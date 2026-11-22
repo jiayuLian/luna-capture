@@ -106,6 +106,7 @@ static void LCExceptionHandler(NSException *e) {
 // TTNet 门面类在 App 首次触达前可能还不存在,做 10 秒窗口的重复尝试。
 static void LCRetryTTNet(int tries) {
     LCHookTTNet();
+    LCHookSession();      // delegate 类可能后加载,一并重试
     if (tries < 20) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -124,6 +125,9 @@ static void LCStartupSchedulers(void) {
         LCWriteTag(LC_TAG_PENDING);
 
         if (full) {
+            // 主通道:NSURLSessionTask resume,签名固定,零风险
+            LCHookSession();
+            // 辅通道:TTNet 的零参数启动方法(若 task 不走 NSURLSession)
             LCHookTTNet();
             LCRetryTTNet(0);
         } else {
