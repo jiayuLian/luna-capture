@@ -21,6 +21,7 @@
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
 #include <sys/mman.h>
 #include <pthread.h>
 #include <zlib.h>
