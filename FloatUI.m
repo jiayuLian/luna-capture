@@ -27,6 +27,8 @@
 @property (nonatomic, strong) UIView *menuMask;
 @property (nonatomic, assign) CGRect buttonRect;
 - (void)lcExport:(BOOL)har;
+- (void)runAutoClaim;
+- (void)showAutoTail;
 @end
 
 static LCFloatWindow *gWindow = nil;
@@ -210,26 +212,31 @@ static UIViewController *LCAppVC(void) {
         LCAutoRun();
     });
 
-    // 轮询结果,结束后把日志尾部弹出来
-    __block NSInteger waited = 0;
+    // 固定两个时间点取日志尾。不用递归 block —— 自引用会触发
+    // -Warc-retain-cycles,在 -Werror 下直接编译失败。
     __weak typeof(self) ws = self;
-    __block void (^poll)(void) = nil;
-    poll = ^{
-        waited += 3;
-        if (LCAutoBusy() && waited < 90) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), poll);
-            return;
-        }
-        NSString *log = LCAutoLogText();
-        NSArray *lines = [log componentsSeparatedByString:@"\n"];
-        NSUInteger n = lines.count;
-        NSString *tail = n > 3 ? [[lines subarrayWithRange:NSMakeRange(n - 3, 3)]
-                                  componentsJoinedByString:@"\n"] : log;
-        [ws toast:tail.length ? tail : @"没有可领的任务"];
-    };
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), poll);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [ws showAutoTail];
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(32 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [ws showAutoTail];
+    });
+}
+
+- (void)showAutoTail {
+    NSString *log = LCAutoLogText();
+    if (log.length == 0) {
+        [self toast:@"还没有日志"];
+        return;
+    }
+    NSArray *lines = [log componentsSeparatedByString:@"\n"];
+    NSUInteger n = lines.count;
+    NSUInteger take = MIN((NSUInteger)4, n);
+    NSString *tail = [[lines subarrayWithRange:NSMakeRange(n - take, take)]
+                      componentsJoinedByString:@"\n"];
+    [self toast:tail];
 }
 
 // 方法名不能叫 export:,那是 UIResponder 自带的(iOS 16+),会撞签名
