@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v1.8.0"
+#define LC_VER @"v1.9.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -57,6 +57,13 @@ BOOL LCTryClaimURL(NSString *url, NSString *method);
 void LCHookSSL(void);
 void LCSetSSLMode(BOOL allowPatch);   // NO = 安全模式,只做数据段重绑
 void LCDiagLine(NSString *line);       // 往 Documents/lc_ssl.txt 追加一行
+
+// 任务自动化:用 App 自己的 TTNetworkManager 发 do_action,
+// 签名与设备指纹由 App 生成(PC 端 Python 会被判 1000043 设备异常)。
+BOOL LCAutoPrepare(void);              // 从已抓流量里取 base 与请求头;NO 表示还没抓过金币页
+void LCAutoRun(void);                  // 异步跑一轮,日志写 Documents/lc_auto.txt
+BOOL LCAutoBusy(void);
+NSString *LCAutoLogText(void);
 int  LCSslHooked(void);
 int  LCSslSeen(void);
 const char *LCSslInfo(void);
