@@ -15,40 +15,50 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 
 #include "hpack_tables.inc"      // kHuffCode / kHuffBits
 
 // ---------------------------------------------------------------- 静态表
 // RFC 7541 附录 A,索引 1..61(索引 0 保留)
 static const char *kHpName[62] = {
-    NULL,
-    ":authority", ":method", ":method", ":path", ":path", ":scheme", ":scheme",
-    ":status", ":status", ":status", ":status", ":status", ":status", ":status",
-    "accept-charset", "accept-encoding", "accept-language", "accept-ranges", "accept",
-    "access-control-allow-origin", "age", "allow", "authorization", "cache-control",
-    "content-disposition", "content-encoding", "content-language", "content-length",
-    "content-location", "content-range", "content-type", "cookie", "date", "etag",
-    "expect", "expires", "from", "host", "if-match", "if-modified-since",
-    "if-none-match", "if-range", "if-unmodified-since", "last-modified", "link",
-    "location", "max-forwards", "proxy-authenticate", "proxy-authorization",
-    "range", "referer", "refresh", "retry-after", "server", "set-cookie",
-    "strict-transport-security", "transfer-encoding", "user-agent", "vary", "via",
-    "www-authenticate"
+    NULL,   // 0
+    ":authority", ":method", ":method", ":path",   // 1-4
+    ":path", ":scheme", ":scheme", ":status",   // 5-8
+    ":status", ":status", ":status", ":status",   // 9-12
+    ":status", ":status", "accept-charset", "accept-encoding",   // 13-16
+    "accept-language", "accept-ranges", "accept", "access-control-allow-origin",   // 17-20
+    "age", "allow", "authorization", "cache-control",   // 21-24
+    "content-disposition", "content-encoding", "content-language", "content-length",   // 25-28
+    "content-location", "content-range", "content-type", "cookie",   // 29-32
+    "date", "etag", "expect", "expires",   // 33-36
+    "from", "host", "if-match", "if-modified-since",   // 37-40
+    "if-none-match", "if-range", "if-unmodified-since", "last-modified",   // 41-44
+    "link", "location", "max-forwards", "proxy-authenticate",   // 45-48
+    "proxy-authorization", "range", "referer", "refresh",   // 49-52
+    "retry-after", "server", "set-cookie", "strict-transport-security",   // 53-56
+    "transfer-encoding", "user-agent", "vary", "via",   // 57-60
+    "www-authenticate",   // 61-61
 };
 
 static const char *kHpVal[62] = {
-    NULL,
-    "", "GET", "POST", "/", "/index.html", "http", "https",
-    "200", "204", "206", "304", "400", "404", "500",
-    "", "gzip, deflate", "", "", "",
-    "", "", "", "", "",
-    "", "", "", "", "",
-    "", "", "", "", "", "",
-    "", "", "", "", "", "", "", "",
-    "", "", "", "", "",
-    "", "", "", "", "",
-    "", "", "", "", "", "",
-    "", "", "", "", "",
+    NULL,   // 0
+    "", "GET", "POST", "/",   // 1-4
+    "/index.html", "http", "https", "200",   // 5-8
+    "204", "206", "304", "400",   // 9-12
+    "404", "500", "", "gzip, deflate",   // 13-16
+    "", "", "", "",   // 17-20
+    "", "", "", "",   // 21-24
+    "", "", "", "",   // 25-28
+    "", "", "", "",   // 29-32
+    "", "", "", "",   // 33-36
+    "", "", "", "",   // 37-40
+    "", "", "", "",   // 41-44
+    "", "", "", "",   // 45-48
+    "", "", "", "",   // 49-52
+    "", "", "", "",   // 53-56
+    "", "", "", "",   // 57-60
+    "",   // 61-61
 };
 
 // ---------------------------------------------------------------- Huffman
@@ -792,13 +802,11 @@ void hp_feed(hp_conn_t *c, int dir, const uint8_t *data, size_t len,
     }
     if (!c->decided) return;
 
-    size_t used = 0;
     if (c->decided == 1) {
         while (*blen > 0) {
             size_t u = parse_h1(c, dir, *buf, *blen, ctx, cb);
             if (!u) break;
             buf_consume(buf, blen, u);
-            used += u;
         }
     } else {
         size_t u = parse_h2(c, dir, *buf, *blen, ctx, cb);
