@@ -26,6 +26,7 @@ void LCAutoLog(NSString *fmt, ...);
 static NSDictionary *gAdParamModel = nil;      // 录到的 jsb 参数
 static NSDictionary *gAdEffectiveExtra = nil;  // becomeEffective 的 extraParameters
 static __unsafe_unretained id gAdBridgeInst = nil;  // 录参数时的 bridge 实例
+static id gAdModelObj = nil;                   // 录到的 paramModel 对象(可能是 Model 而非字典)
 static NSLock *gAdLock = nil;
 static BOOL gAdHooked = NO;
 static volatile BOOL gAdBusy = NO;
@@ -46,6 +47,42 @@ static NSString *LCJSONText(id obj) {
     return s.length > 900 ? [s substringToIndex:900] : s;
 }
 
+// 反射 dump 一个模型对象。
+// 第一次录参数时发现传进来的是 BDUGLuckyADRewardedVideoXBridgeModel
+// 而不是字典,所以必须按对象属性读,不能只认 NSDictionary。
+static NSString *LCDumpObject(id obj, int depth) {
+    if (!obj) return @"nil";
+    if ([obj isKindOfClass:[NSString class]] || [obj isKindOfClass:[NSNumber class]]) {
+        NSString *v = [obj description];
+        return v.length > 120 ? [v substringToIndex:120] : v;
+    }
+    if (depth > 2) return [NSString stringWithFormat:@"<%@>", NSStringFromClass([obj class])];
+
+    NSMutableString *s = [NSMutableString stringWithFormat:@"<%@ {", NSStringFromClass([obj class])];
+    unsigned int n = 0;
+    objc_property_t *props = class_copyPropertyList([obj class], &n);
+    int shown = 0;
+    for (unsigned int i = 0; props && i < n && shown < 40; i++) {
+        const char *nm = property_getName(props[i]);
+        const char *attrs = property_getAttributes(props[i]);
+        if (!nm || !attrs) continue;
+        // 只读对象类型:T@"..."。C 标量/结构体属性跳过,避免读到野指针
+        if (attrs[0] != 'T' || attrs[1] != '@') continue;
+        NSString *key = [NSString stringWithUTF8String:nm];
+        if ([key isEqualToString:@"hash"] || [key isEqualToString:@"superclass"] ||
+            [key isEqualToString:@"description"] || [key isEqualToString:@"debugDescription"]) continue;
+        @try {
+            id v = [obj valueForKey:key];
+            if (!v) continue;
+            [s appendFormat:@"%@=%@; ", key, LCDumpObject(v, depth + 1)];
+            shown++;
+        } @catch (NSException *e) { }
+    }
+    if (props) free(props);
+    [s appendString:@"}>"];
+    return (s.length > 1200) ? [s substringToIndex:1200] : s;
+}
+
 #pragma mark - hook
 
 typedef void (*LCBridgeCallIMP)(id, SEL, id, id);
@@ -60,8 +97,12 @@ static void LCBridgeCall(id self, SEL _cmd, id paramModel, id completion) {
         gAdBridgeInst = self;
         [gAdLock unlock];
         LCAutoLog(@"[ad] 录到 paramModel: %@", LCJSONText(paramModel));
-    } else {
-        LCAutoLog(@"[ad] bridge 参数类型 %@", NSStringFromClass([paramModel class]));
+    } else if (paramModel) {
+        if (!gAdLock) gAdLock = [NSLock new];
+        [gAdLock lock];
+        gAdModelObj = paramModel;
+        [gAdLock unlock];
+        LCAutoLog(@"[ad] 录到 paramModel 对象: %@", LCDumpObject(paramModel, 0));
     }
     if (gOrigBridgeCall) gOrigBridgeCall(self, _cmd, paramModel, completion);
 }
@@ -123,19 +164,16 @@ void LCAdHookInstall(void) {
 }
 
 BOOL LCAdHasTemplate(void) {
-    if (!gAdLock) return gAdParamModel != nil;
+    if (!gAdLock) return (gAdParamModel.count > 0) || gAdModelObj != nil;
     [gAdLock lock];
-    BOOL has = (gAdParamModel.count > 0);
+    BOOL has = (gAdParamModel.count > 0) || gAdModelObj != nil;
     [gAdLock unlock];
     return has;
 }
 
 NSString *LCAdTemplateText(void) {
-    if (!gAdLock) return LCJSONText(gAdParamModel);
-    [gAdLock lock];
-    NSString *s = LCJSONText(gAdParamModel);
-    [gAdLock unlock];
-    return s;
+    if (gAdModelObj) return LCDumpObject(gAdModelObj, 0);
+    return LCJSONText(gAdParamModel);
 }
 
 #pragma mark - 循环触发
@@ -151,7 +189,8 @@ static void LCAdTick(void) {
     gAdRemain--;
 
     id bridge = gAdBridgeInst;
-    if (!bridge || !gAdParamModel) {
+    id pm = gAdModelObj ?: gAdParamModel;
+    if (!bridge || !pm) {
         LCAutoLog(@"[ad] 没有可复用的 bridge 实例,停止");
         gAdBusy = NO;
         gAdRemain = 0;
@@ -171,7 +210,6 @@ static void LCAdTick(void) {
         NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
         [inv setTarget:bridge];
         [inv setSelector:s];
-        id pm = gAdParamModel;
         id cb = nil;
         [inv setArgument:&pm atIndex:2];
         [inv setArgument:&cb atIndex:3];
@@ -195,6 +233,10 @@ void LCAdRun(NSInteger times) {
     }
     if (!LCAdHasTemplate()) {
         LCAutoLog(@"[ad] 还没有参数样本:先在 App 里手动点一次「看广告赚金币」");
+        return;
+    }
+    if (!gAdBridgeInst) {
+        LCAutoLog(@"[ad] 没有 bridge 实例,无法触发");
         return;
     }
     if (times <= 0) times = 1;
