@@ -144,6 +144,7 @@ static BOOL LCInternalHas(NSString *k) {
     NSMutableArray<LCRecord *> *_records;
     NSLock *_lock;
     NSTimeInterval _lastNotify;
+    NSInteger _seqCounter;
 }
 
 + (instancetype)shared {
@@ -167,8 +168,10 @@ static BOOL LCInternalHas(NSString *k) {
     NSUInteger n = 0;
     BOOL notify = NO;
     [_lock lock];
+    if (rec.seq == 0) rec.seq = ++_seqCounter;
     [_records addObject:rec];
-    if (_records.count > 5000) [_records removeObjectsInRange:NSMakeRange(0, 1000)];
+    // 连续看广告会产出大量请求,上限放宽到 8000 条
+    if (_records.count > 8000) [_records removeObjectsInRange:NSMakeRange(0, 1500)];
     n = _records.count;
     // 节流:250ms 内最多刷一次 UI,否则高频请求会把主线程刷爆
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -325,7 +328,8 @@ static BOOL LCInternalHas(NSString *k) {
             @"response": resp,
             @"cache": @{},
             @"timings": @{@"send": @0, @"wait": @(ms), @"receive": @0},
-            @"_source": r.source ?: @""
+            @"_source": r.source ?: @"",
+            @"_seq": @(r.seq)
         }];
     }
 
@@ -390,9 +394,10 @@ static BOOL LCSkipURL(NSURL *u) {
     static NSArray *ext = nil;
     static dispatch_once_t onceExt;
     dispatch_once(&onceExt, ^{
-        ext = @[@".mp3", @".m4a", @".mp4", @".aac", @".flac", @".wav", @".ogg",
-                @".webp", @".png", @".jpg", @".jpeg", @".gif", @".svg", @".heic",
-                @".ttf", @".otf", @".zip", @".dylib", @".js", @".css", @".map"];
+        ext = @[@".mp3", @".m4a", @".mp4", @".m4v", @".mov", @".flv", @".aac",
+                @".flac", @".wav", @".ogg", @".m3u8", @".m3u", @".ts", @".m4s",
+                @".mpd", @".webp", @".png", @".jpg", @".jpeg", @".gif", @".svg",
+                @".heic", @".ttf", @".otf", @".zip", @".dylib", @".js", @".css", @".map"];
     });
     for (NSString *e in ext) {
         if ([p hasSuffix:e]) return YES;
@@ -406,6 +411,31 @@ static BOOL LCSkipURL(NSURL *u) {
     });
     for (NSString *c in cdn) {
         if ([h containsString:c]) return YES;
+    }
+    return NO;
+}
+
+// 判断是不是播放器/分片请求。
+// 这类请求被 NSURLProtocol 接管后再逐块转发,会丢掉 Content-Range 语义,
+// AVPlayer 直接报错 —— 看广告会黑屏,领奖链路就断了。必须按请求头放行。
+static BOOL LCIsMediaRequest(NSURLRequest *req) {
+    if (!req) return YES;
+    // Range 请求:分片 / 拖动进度
+    if ([req valueForHTTPHeaderField:@"Range"].length > 0) return YES;
+
+    NSString *accept = [[req valueForHTTPHeaderField:@"Accept"] lowercaseString];
+    if (accept.length) {
+        if ([accept containsString:@"video/"] ||
+            [accept containsString:@"audio/"] ||
+            [accept containsString:@"image/"]) {
+            return YES;
+        }
+    }
+    // 播放器常见的分段标识
+    NSString *u = [req.URL.absoluteString lowercaseString];
+    if ([u containsString:@"bytestart="] || [u containsString:@"byteend="] ||
+        [u containsString="/video/tos/"] || [u containsString="/audio/tos/"]) {
+        return YES;
     }
     return NO;
 }
@@ -426,6 +456,7 @@ static BOOL LCSkipURL(NSURL *u) {
     if (LCInternalHas(LCReqKey(request))) return NO;
     NSString *scheme = request.URL.scheme.lowercaseString;
     if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return NO;
+    if (LCIsMediaRequest(request)) return NO;   // 播放器分片一律放行,接管会破坏播放
     if (LCSkipURL(request.URL)) return NO;
     return YES;
 }
@@ -456,6 +487,11 @@ static BOOL LCSkipURL(NSURL *u) {
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     cfg.protocolClasses = @[];
+    // 转发时尽量继承原 session 的行为,否则丢 cookie 会让鉴权接口直接 401
+    cfg.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    cfg.HTTPShouldSetCookies = YES;
+    NSTimeInterval t = self.request.timeoutInterval;
+    cfg.timeoutIntervalForRequest = (t > 0 && t < 120) ? t : 30;
     _inner = [NSURLSession sessionWithConfiguration:cfg delegate:nil delegateQueue:nil];
 
     __weak typeof(self) weakSelf = self;
@@ -508,6 +544,11 @@ static id LCDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *req,
                                 void (^handler)(NSData *, NSURLResponse *, NSError *)) {
     if (!gOrigDataTask) return nil;
     if (!req || handler == NULL) {
+        return gOrigDataTask(self, _cmd, req, handler);
+    }
+
+    // 媒体请求原样放行:不包装、不记录,保证播放器行为完全不变
+    if (LCIsMediaRequest(req) || LCSkipURL(req.URL)) {
         return gOrigDataTask(self, _cmd, req, handler);
     }
 
