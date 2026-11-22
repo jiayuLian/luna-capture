@@ -54,6 +54,7 @@ static NSInteger gAdRemain = 0;
 static NSInteger gAdTotalCount = 0;
 static NSTimeInterval gAdPlayStart = 0;
 static NSTimeInterval gAdOpenAt = 0;
+static NSTimeInterval gAdCloseTryAt = 0;   // 上次尝试关闭的时刻，用于限流重试
 static NSTimer *gAdTimer = nil;
 
 #pragma mark - 工具
@@ -244,14 +245,21 @@ static void LCTick(void) {
         return;
     }
 
-    if (gAdPlaying) {
+    if (gAdPlaying && !gAdSawClose) {
         NSTimeInterval el = [[NSDate date] timeIntervalSince1970] - gAdPlayStart;
         if (el >= kAdMinSeconds) {
-            LCForceCloseAd();
-            // 关不掉就在下一 tick 再来一次
-            if (!gAdSawClose && el > kAdMinSeconds + 20) {
-                LCAutoLog(@"[ad] 20 秒还没关掉，放弃本轮");
-                gAdSawClose = YES;
+            // 点关闭允许重试：第一次可能点到别的控件或按钮还没出来。
+            // 每 5 秒重试一次，最多重试到 kAdMinSeconds+25。
+            BOOL due = (gAdCloseTryAt <= 0) ||
+                       ([[NSDate date] timeIntervalSince1970] - gAdCloseTryAt >= 5);
+            if (due) {
+                gAdCloseTryAt = [[NSDate date] timeIntervalSince1970];
+                gAdClosing = NO;          // 解锁，让 LCForceCloseAd 真正执行
+                LCForceCloseAd();
+            }
+            if (el > kAdMinSeconds + 25) {
+                LCAutoLog(@"[ad] %ld 秒还没关掉，放弃本轮", (long)(kAdMinSeconds + 25));
+                gAdSawClose = YES;        // 强行推进下一轮
             }
         }
     } else if (gAdOpening) {
@@ -538,6 +546,7 @@ id LCAdTrigger(void) {
     gAdClosing = NO;
     gAdSawClose = NO;
     gAdOpenAt = [[NSDate date] timeIntervalSince1970];
+    gAdCloseTryAt = 0;
 
     @try {
         // 精确签名直调，不用 NSInvocation —— 之前用 NSInvocation 转发
