@@ -51,6 +51,22 @@ static void LCPresentShare(NSString *path, UIView *anchor) {
     [top presentViewController:avc animated:YES completion:nil];
 }
 
+static void LCToast(NSString *msg) {
+    UIAlertController *a =
+        [UIAlertController alertControllerWithTitle:nil
+                                            message:msg
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                          style:UIAlertActionStyleDefault
+                                        handler:nil]];
+    UIViewController *top = LCTopVC();
+    if (top.presentedViewController) {
+        [top.presentedViewController presentViewController:a animated:YES completion:nil];
+    } else {
+        [top presentViewController:a animated:YES completion:nil];
+    }
+}
+
 @implementation LCFloatVC
 
 - (void)viewDidLoad {
@@ -118,6 +134,7 @@ static void LCPresentShare(NSString *path, UIView *anchor) {
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction *a) {
         NSString *p = [[LCCapture shared] exportHAR];
+        if (p.length == 0) { LCToast(@"导出失败,看 Xcode / 控制台日志"); return; }
         LCPresentShare(p, self.btn);
     }]];
 
@@ -125,6 +142,7 @@ static void LCPresentShare(NSString *path, UIView *anchor) {
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction *a) {
         NSString *p = [[LCCapture shared] exportJSON];
+        if (p.length == 0) { LCToast(@"导出失败,看 Xcode / 控制台日志"); return; }
         LCPresentShare(p, self.btn);
     }]];
 
@@ -151,10 +169,12 @@ static void LCPresentShare(NSString *path, UIView *anchor) {
 
 #pragma mark - 安装
 
-static void LCSetupUI_inner(void) {
+static void LCScheduleUI(int attempt);
+
+static BOOL LCSetupUI_inner(void) {
     if (gWindow) {
         gWindow.hidden = NO;
-        return;
+        return YES;
     }
 
     CGRect screen = [UIScreen mainScreen].bounds;
@@ -170,8 +190,11 @@ static void LCSetupUI_inner(void) {
                 break;
             }
         }
+        // 场景还没就绪,用 initWithFrame 建的 window 在 iOS 13+ 不会显示,必须等
+        if (!w) return NO;
+    } else {
+        w = [[LCFloatWindow alloc] initWithFrame:screen];
     }
-    if (!w) w = [[LCFloatWindow alloc] initWithFrame:screen];
 
     w.frame = CGRectMake(x, y, size, size);
     w.windowLevel = UIWindowLevelAlert + 50;
@@ -180,12 +203,24 @@ static void LCSetupUI_inner(void) {
     w.hidden = NO;
 
     gWindow = w;
-    NSLog(@"[LC] UI ready");
+    return YES;
+}
+
+static void LCScheduleUI(int attempt) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (LCSetupUI_inner()) {
+            NSLog(@"[LC] UI ready (attempt %d)", attempt);
+            return;
+        }
+        if (attempt < 30) {
+            LCScheduleUI(attempt + 1);
+        } else {
+            NSLog(@"[LC] UI gave up after %d attempts", attempt);
+        }
+    });
 }
 
 void LCSetupUI(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        LCSetupUI_inner();
-    });
+    LCScheduleUI(0);
 }
