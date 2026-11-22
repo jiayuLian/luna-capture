@@ -553,8 +553,11 @@ void LCHookTTNet(void) {
         if (!candidate) continue;
 
         @try {
-            if ([c respondsToSelector:NSSelectorFromString(@"shareInstance")]) {
-                [(id)c performSelector:NSSelectorFromString(@"shareInstance")];
+            SEL shareSel = NSSelectorFromString(@"shareInstance");
+            if (shareSel && [c respondsToSelector:shareSel]) {
+                // 用 IMP 直调,避免 ARC 对未知 selector 的 performSelector 告警
+                IMP f = [c methodForSelector:shareSel];
+                if (f) ((void (*)(id, SEL))f)(c, shareSel);
             }
         } @catch (NSException *e) {}
 
