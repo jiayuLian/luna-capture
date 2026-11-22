@@ -29,6 +29,7 @@
 - (void)lcExport:(BOOL)har;
 - (void)runAutoClaim;
 - (void)runAutoAd;
+- (void)exportLog;
 - (void)showAutoTail;
 @end
 
@@ -123,7 +124,8 @@ static UIViewController *LCAppVC(void) {
 
     CGFloat pw = 250;
     CGFloat rowH = 46;
-    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"自动领奖", @"看广告 ×5", @"清空记录", @"关闭菜单"];
+    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"导出日志", @"自动领奖",
+                        @"看广告 ×5", @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - pw) / 2.0,
@@ -152,9 +154,9 @@ static UIViewController *LCAppVC(void) {
         row.titleLabel.font = [UIFont systemFontOfSize:16];
         [row setTitle:titles[(NSUInteger)i] forState:UIControlStateNormal];
         UIColor *c = [UIColor darkTextColor];
-        if (i == 2) c = [UIColor systemBlueColor];      // 自动领奖
-        if (i == 3) c = [UIColor systemBlueColor];      // 看广告
-        if (i == 4) c = [UIColor systemRedColor];       // 清空记录
+        if (i == 2) c = [UIColor systemGreenColor];     // 导出日志
+        if (i == 3 || i == 4) c = [UIColor systemBlueColor];   // 自动领奖 / 看广告
+        if (i == 5) c = [UIColor systemRedColor];       // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -182,9 +184,10 @@ static UIViewController *LCAppVC(void) {
     switch (sender.tag) {
         case 0: [self lcExport:YES]; break;
         case 1: [self lcExport:NO];  break;
-        case 2: [self runAutoClaim]; break;
-        case 3: [self runAutoAd]; break;
-        case 4:
+        case 2: [self exportLog]; break;
+        case 3: [self runAutoClaim]; break;
+        case 4: [self runAutoAd]; break;
+        case 5:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;
@@ -192,6 +195,27 @@ static UIViewController *LCAppVC(void) {
             [self hideMenu];
             break;
     }
+}
+
+// 导出日志。沙盒 Documents 在「文件」App 里看不到,
+// 所以和 HAR 一样走系统分享面板(AirDrop / 存到文件 / 发微信都行)。
+- (void)exportLog {
+    NSString *p = LCAutoExportLog();
+    if (p.length == 0) {
+        [self toast:@"日志导出失败"];
+        return;
+    }
+    NSURL *u = [NSURL fileURLWithPath:p];
+    UIActivityViewController *avc =
+        [[UIActivityViewController alloc] initWithActivityItems:@[u]
+                                         applicationActivities:nil];
+    avc.popoverPresentationController.sourceView = self.btn;
+    avc.popoverPresentationController.sourceRect = self.btn.bounds;
+
+    UIViewController *top = LCAppVC();
+    if (!top) top = self;
+    [self hideMenu];
+    [top presentViewController:avc animated:YES completion:nil];
 }
 
 // 自动领奖:走 App 自己的网络层发 do_action,签名与设备指纹由 App 生成。
