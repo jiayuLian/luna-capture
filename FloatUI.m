@@ -26,6 +26,7 @@
 @property (nonatomic, strong) UIButton *btn;
 @property (nonatomic, strong) UIView *menuMask;
 @property (nonatomic, assign) CGRect buttonRect;
+- (void)lcExport:(BOOL)har;
 @end
 
 static LCFloatWindow *gWindow = nil;
@@ -173,8 +174,8 @@ static UIViewController *LCAppVC(void) {
 
 - (void)onMenuRow:(UIButton *)sender {
     switch (sender.tag) {
-        case 0: [self export:YES]; break;
-        case 1: [self export:NO];  break;
+        case 0: [self lcExport:YES]; break;
+        case 1: [self lcExport:NO];  break;
         case 2:
             [[LCCapture shared] clear];
             [self hideMenu];
@@ -185,7 +186,8 @@ static UIViewController *LCAppVC(void) {
     }
 }
 
-- (void)export:(BOOL)har {
+// 方法名不能叫 export:,那是 UIResponder 自带的(iOS 16+),会撞签名
+- (void)lcExport:(BOOL)har {
     NSString *p = har ? [[LCCapture shared] exportHAR]
                       : [[LCCapture shared] exportJSON];
     if (p.length == 0) {
