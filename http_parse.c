@@ -136,18 +136,29 @@ static int huff_decode(const uint8_t *s, size_t n, char **out, size_t *olen) {
         }
     }
 
-    // 结尾不足 13 位:补零查表,码长超过剩余位数说明是填充位,丢弃
-    if (nbits > 0) {
-        uint32_t idx = (uint32_t)((acc << (13 - nbits)) & 0x1FFF);
-        uint32_t e = gHuffLUT[idx];
-        if (e) {
-            int used = (int)(e >> 16);
-            int sym = (int)(e & 0xFFFF);
-            if (used <= nbits && sym != 256) {
-                if (ol + 1 >= cap) { cap *= 2; o = (char *)realloc(o, cap); }
-                o[ol++] = (char)sym;
-            }
+    // 结尾剩余位里可能还压着一到两个短码。
+    // 原来只解得了一个,导致每个 Huffman 字符串丢尾部字符 ——
+    // 表现就是 "application/json" 变成 "application/jso"、
+    // content-encoding 变成 "gzi",gzip 响应全部解不开。
+    while (nbits > 0) {
+        uint32_t room = 13u - (uint32_t)nbits;
+        uint32_t pat = (uint32_t)((acc << room) & 0x1FFF);
+        if (room) pat |= (uint32_t)((1u << room) - 1u);   // 补 1,与 EOB 填充一致
+        uint32_t e = gHuffLUT[pat & 0x1FFF];
+        if (!e) break;
+        int used = (int)(e >> 16);
+        int sym  = (int)(e & 0xFFFF);
+        if (used > nbits) break;      // 超出剩余位数 = 纯填充
+        if (sym == 256) break;        // EOB
+        if (ol + 1 >= cap) {
+            cap *= 2;
+            char *np = (char *)realloc(o, cap);
+            if (!np) { free(o); return -1; }
+            o = np;
         }
+        o[ol++] = (char)sym;
+        nbits -= used;
+        acc &= ((1ULL << nbits) - 1);
     }
 
     o[ol] = 0;
