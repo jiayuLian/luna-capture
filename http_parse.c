@@ -129,6 +129,7 @@ static int huff_decode(const uint8_t *s, size_t n, char **out, size_t *olen) {
                     o[ol++] = (char)sym;
                 }
             }
+            if (used <= 0) break;          // 码长异常,直接收尾,防死循环
             nbits -= used;
             if (nbits <= 0) { nbits = 0; acc = 0; break; }
             acc &= ((1ULL << nbits) - 1);
