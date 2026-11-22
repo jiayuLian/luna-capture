@@ -27,16 +27,19 @@
 #include <pthread.h>
 #include <zlib.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <ctype.h>
+#include <errno.h>
+#include <mach/vm_region.h>
+#include <mach/mach_vm.h>
 
 void LCHookSSL(void);
 
 static volatile int gSslHooked = 0;
 static volatile int gSslSeen = 0;
-static char gSslInfo[192] = "ssl:init";
 
 int  LCSslHooked(void) { return gSslHooked; }
 int  LCSslSeen(void) { return gSslSeen; }
-const char *LCSslInfo(void) { return gSslInfo; }
 
 #pragma mark - 连接包装
 
@@ -45,6 +48,7 @@ const char *LCSslInfo(void) { return gSslInfo; }
 @interface LCConnWrap : NSObject
 @property (nonatomic, assign) hp_conn_t *hp;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, LCRecord *> *pending;
+@property (nonatomic, assign) BOOL sniLogged;
 @end
 
 @implementation LCConnWrap
@@ -257,7 +261,190 @@ static void lc_on_msg(void *ctx, const hp_msg_t *msg) {
     }
 }
 
-#pragma mark - inline hook
+#pragma mark - 诊断
+
+static NSString *lc_doc_dir(void) {
+    static NSString *dir = nil;
+    static dispatch_once_t arOnce;
+    dispatch_once(&arOnce, ^{
+        NSArray *ps = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                          NSUserDomainMask, YES);
+        if (ps.count) dir = ps.firstObject;
+    });
+    return dir;
+}
+
+static pthread_mutex_t gDiagLock = PTHREAD_MUTEX_INITIALIZER;
+
+// 每一步的结果都落盘。TrollFools 注入的进程拿不到控制台,
+// 这个文件是唯一能在出问题后确认走到哪一步的东西。
+static void lc_diag(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSLog(@"[LC] %@", s);
+
+    NSString *dir = lc_doc_dir();
+    if (dir.length == 0) return;
+    NSString *path = [dir stringByAppendingPathComponent:@"lc_ssl.txt"];
+
+    pthread_mutex_lock(&gDiagLock);
+    static NSFileHandle *fh = nil;
+    static BOOL stop = NO;
+    if (!fh && !stop) {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) {
+            [fm createFileAtPath:path contents:[NSData data] attributes:nil];
+        }
+        fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (fh) {
+            @try { [fh seekToEndOfFile]; } @catch (NSException *e) { fh = nil; }
+        }
+    }
+    if (fh) {
+        @try {
+            NSData *d = [[s stringByAppendingString:@"\n"]
+                         dataUsingEncoding:NSUTF8StringEncoding];
+            [fh writeData:d];
+            if ([fh offsetInFile] > (4u << 20)) { [fh closeFile]; fh = nil; stop = YES; }
+        } @catch (NSException *e) {
+            fh = nil;
+            stop = YES;
+        }
+    }
+    pthread_mutex_unlock(&gDiagLock);
+}
+
+#pragma mark - 符号定位
+
+// 只接受"已定义在某个 section 里"的符号。
+// v1.5.0 就死在这一步:SSL_read 在主二进制里是 N_UNDF,n_value 为 0,
+// 加上 slide 之后得到一个非 NULL 的野指针,后面 memcpy 直接 EXC_BAD_ACCESS。
+static void *lc_sym_defined(const struct mach_header_64 *mh, intptr_t slide,
+                            const char *want) {
+    if (!mh || mh->magic != MH_MAGIC_64) return NULL;
+
+    const uint8_t *p = (const uint8_t *)(mh + 1);
+    for (uint32_t c = 0; c < mh->ncmds; c++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SYMTAB) {
+            const struct symtab_command *st = (const struct symtab_command *)lc;
+            const struct nlist_64 *syms =
+                (const struct nlist_64 *)((const uint8_t *)mh + st->symoff);
+            const char *strs = (const char *)mh + st->stroff;
+            for (uint32_t k = 0; k < st->nsyms; k++) {
+                if (syms[k].n_un.n_strx == 0) continue;
+                if (syms[k].n_type & N_STAB) continue;
+                if ((syms[k].n_type & N_TYPE) != N_SECT) continue;   // 必须是已定义
+                if (syms[k].n_value == 0) continue;
+                const char *nm = strs + syms[k].n_un.n_strx;
+                if (strcmp(nm, want) == 0) {
+                    return (void *)(uintptr_t)(syms[k].n_value + slide);
+                }
+            }
+        }
+        p += lc->cmdsize;
+    }
+    return NULL;
+}
+
+static void *lc_lookup(const char *sym, const char *dsym) {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *img = _dyld_get_image_name(i);
+        if (!img) continue;
+        if (!strstr(img, "boringssl") && !strstr(img, "BoringSSL")) continue;
+        void *r = lc_sym_defined(
+            (const struct mach_header_64 *)_dyld_get_image_header(i),
+            _dyld_get_image_vmaddr_slide(i), sym);
+        if (r) return r;
+    }
+    return dlsym(RTLD_DEFAULT, dsym);
+}
+
+#pragma mark - 数据槽重绑
+
+static const char *kLCDataSegs[] = {
+    "__DATA", "__DATA_CONST", "__DATA_DIRTY", "__AUTH", "__AUTH_CONST", NULL
+};
+
+static vm_prot_t lc_page_prot(void *addr) {
+    vm_address_t region = (vm_address_t)((uintptr_t)addr & ~(uintptr_t)0xFFF);
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &region, &size,
+                                    VM_REGION_BASIC_INFO_64,
+                                    (vm_region_info_t)&info, &cnt, &obj);
+    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+    if (kr != KERN_SUCCESS) return 0;
+    return info.protection;
+}
+
+// 8 字节对齐写入,必要时临时放开写权限,写完恢复原权限。
+static int lc_write_slot(void *slot, uint64_t val) {
+    vm_prot_t old = lc_page_prot(slot);
+    if (old == 0) return -1;
+
+    uintptr_t page = (uintptr_t)slot & ~(uintptr_t)0xFFF;
+    BOOL needRestore = !(old & VM_PROT_WRITE);
+
+    if (needRestore) {
+        kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x4000,
+                                      false, old | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            // __DATA_CONST 带 SG_READ_ONLY,先做私有拷贝再写
+            kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false,
+                            old | VM_PROT_WRITE | VM_PROT_COPY);
+        }
+        if (kr != KERN_SUCCESS) return -2;
+    }
+    *(volatile uint64_t *)slot = val;
+    if (needRestore) {
+        vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false, old);
+    }
+    return 0;
+}
+
+// 把主镜像数据段里所有等于 real 的 8 字节槽改成 hook。
+// 这是纯数据段写,不碰代码页、不需要可执行权限,任何情况下都不会让进程崩。
+static int lc_rebind_main(uint64_t real, void *hook, int *failOut) {
+    int hits = 0, fails = 0;
+    const struct mach_header_64 *mh =
+        (const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!mh || mh->magic != MH_MAGIC_64) { if (failOut) *failOut = -1; return 0; }
+    intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+
+    const uint8_t *p = (const uint8_t *)(mh + 1);
+    for (uint32_t c = 0; c < mh->ncmds; c++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
+            BOOL want = NO;
+            for (int i = 0; kLCDataSegs[i]; i++) {
+                if (strncmp(sg->segname, kLCDataSegs[i], 16) == 0) { want = YES; break; }
+            }
+            if (want && sg->filesize > 0) {
+                uint8_t *base = (uint8_t *)(uintptr_t)(slide + sg->vmaddr);
+                size_t n = (size_t)sg->filesize;
+                if (sg->vmsize < n) n = (size_t)sg->vmsize;
+                n &= ~(size_t)7;
+                for (size_t o = 0; o < n; o += 8) {
+                    uint64_t v = *(volatile uint64_t *)(base + o);
+                    if (v != real) continue;
+                    if (lc_write_slot(base + o, (uint64_t)(uintptr_t)hook) == 0) hits++;
+                    else fails++;
+                }
+            }
+        }
+        p += lc->cmdsize;
+    }
+    if (failOut) *failOut = fails;
+    return hits;
+}
+
+#pragma mark - inline hook(兜底)
 
 static int lc_is_pc_relative(uint32_t ins) {
     if ((ins & 0x9F000000u) == 0x90000000u) return 1;   // ADRP
@@ -270,16 +457,34 @@ static int lc_is_pc_relative(uint32_t ins) {
     return 0;
 }
 
-// 用 16 字节绝对跳转替换函数头:
-//   ldr x16, #8
-//   br  x16
-//   <8 字节目标地址>
+// 先确认 target 落在一个已映射的可执行区里,再动手。
+// 少了这一步,v1.5.0 就是拿一个野指针去 memcpy。
+static BOOL lc_exec_region(void *target, uintptr_t *baseOut, vm_size_t *sizeOut) {
+    vm_address_t region = (vm_address_t)target;
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &region, &size,
+                                    VM_REGION_BASIC_INFO_64,
+                                    (vm_region_info_t)&info, &cnt, &obj);
+    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+    if (kr != KERN_SUCCESS) return NO;
+    if (!(info.protection & VM_PROT_EXECUTE)) return NO;
+    if ((uintptr_t)target < (uintptr_t)region) return NO;
+    if ((uintptr_t)target >= (uintptr_t)region + (uintptr_t)size) return NO;
+    if (baseOut) *baseOut = (uintptr_t)region;
+    if (sizeOut) *sizeOut = size;
+    return YES;
+}
+
 static int lc_patch(void *target, void *replace, void **trampoline_out) {
     if (!target || !replace) return -1;
+    if (!lc_exec_region(target, NULL, NULL)) return -5;
+
     uint32_t *code = (uint32_t *)target;
     uint32_t backup[4];
     memcpy(backup, code, 16);
-
     for (int i = 0; i < 4; i++) {
         if (lc_is_pc_relative(backup[i])) return -2;
     }
@@ -291,16 +496,18 @@ static int lc_patch(void *target, void *replace, void **trampoline_out) {
     memcpy(tr, backup, 16);
     uint32_t *tp = (uint32_t *)(tr + 16);
     tp[0] = 0x58000050u;   // ldr x16, #8
-    tp[1] = 0xD61F0200u;   // br x16
+    tp[1] = 0xD61F0200u;   // br  x16
     *(uint64_t *)(tr + 24) = (uint64_t)((uint8_t *)target + 16);
 
-    mprotect(tr, 4096, PROT_READ | PROT_EXEC);
+    if (mprotect(tr, 4096, PROT_READ | PROT_EXEC) != 0) {
+        munmap(tr, 4096);
+        return -3;
+    }
     sys_icache_invalidate(tr, 32);
 
-    uintptr_t page = (uintptr_t)target & ~0xFFFULL;
-    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x2000,
-                                  false,
-                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    uintptr_t page = (uintptr_t)target & ~(uintptr_t)0xFFF;
+    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x4000,
+                                  false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
         munmap(tr, 4096);
         return -4;
@@ -311,58 +518,46 @@ static int lc_patch(void *target, void *replace, void **trampoline_out) {
     *(uint64_t *)&code[2] = (uint64_t)replace;
     sys_icache_invalidate(target, 16);
 
-    vm_protect(mach_task_self(), (vm_address_t)page, 0x2000, false,
+    vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false,
                VM_PROT_READ | VM_PROT_EXECUTE);
 
     if (trampoline_out) *trampoline_out = tr;
     return 0;
 }
 
-// 在已加载的镜像里按名字找符号地址(不依赖全局可见性)
-static void *lc_find_sym(const char *want) {
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *img = _dyld_get_image_name(i);
-        if (!img) continue;
-        if (!strstr(img, "boringssl") && !strstr(img, "BoringSSL") &&
-            !strstr(img, "Luna") && !strstr(img, "Schubert")) continue;
-
-        const struct mach_header_64 *mh =
-            (const struct mach_header_64 *)_dyld_get_image_header(i);
-        if (!mh || mh->magic != MH_MAGIC_64) continue;
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-
-        const uint8_t *p = (const uint8_t *)(mh + 1);
-        for (uint32_t c = 0; c < mh->ncmds; c++) {
-            const struct load_command *lc = (const struct load_command *)p;
-            if (lc->cmd == LC_SYMTAB) {
-                const struct symtab_command *st = (const struct symtab_command *)lc;
-                const struct nlist_64 *syms =
-                    (const struct nlist_64 *)((const uint8_t *)mh + st->symoff);
-                const char *strs = (const char *)mh + st->stroff;
-                for (uint32_t k = 0; k < st->nsyms; k++) {
-                    if (syms[k].n_un.n_strx == 0) continue;
-                    const char *nm = strs + syms[k].n_un.n_strx;
-                    if (strcmp(nm, want) == 0) {
-                        return (void *)((uint8_t *)(syms[k].n_value + slide));
-                    }
-                }
-            }
-            p += lc->cmdsize;
-        }
-    }
-    return NULL;
-}
-
 #pragma mark - SSL hook
 
 static int (*gOrigWrite)(void *, const void *, int) = NULL;
 static int (*gOrigRead)(void *, void *, int) = NULL;
+static const char *(*gOrigSNI)(void *, int) = NULL;
+
+static volatile unsigned long long gRawW = 0;
+static volatile unsigned long long gRawR = 0;
+static char gHookMode[96] = "ssl:init";
+static BOOL gAllowPatch = YES;   // 安全模式下只允许数据段重绑,不做 inline hook
+
+void LCSetSSLMode(BOOL allowPatch) { gAllowPatch = allowPatch; }
+void LCDiagLine(NSString *line) { lc_diag(@"%@", line); }
+
+// 每条连接只记一次 SNI,用来确认到底连了哪些域名
+static void lc_log_sni(LCConnWrap *w, void *ssl) {
+    if (!w || w.sniLogged || !gOrigSNI) return;
+    w.sniLogged = YES;
+    const char *s = NULL;
+    @try { s = gOrigSNI(ssl, 0); } @catch (NSException *e) { s = NULL; }
+    if (s && s[0]) lc_diag(@"tls sni=%s", s);
+}
 
 static int lc_ssl_write(void *ssl, const void *buf, int num) {
     int r = gOrigWrite ? gOrigWrite(ssl, buf, num) : -1;
     if (r > 0) {
+        gRawW++;
         LCConnWrap *w = conn_get(ssl);
-        if (w && w.hp) hp_feed(w.hp, 0, (const uint8_t *)buf, (size_t)r, (__bridge void *)w, lc_on_msg);
+        lc_log_sni(w, ssl);
+        if (w && w.hp) {
+            hp_feed(w.hp, 0, (const uint8_t *)buf, (size_t)r,
+                    (__bridge void *)w, lc_on_msg);
+        }
     }
     return r;
 }
@@ -370,8 +565,13 @@ static int lc_ssl_write(void *ssl, const void *buf, int num) {
 static int lc_ssl_read(void *ssl, void *buf, int num) {
     int r = gOrigRead ? gOrigRead(ssl, buf, num) : -1;
     if (r > 0) {
+        gRawR++;
         LCConnWrap *w = conn_get(ssl);
-        if (w && w.hp) hp_feed(w.hp, 1, (const uint8_t *)buf, (size_t)r, (__bridge void *)w, lc_on_msg);
+        lc_log_sni(w, ssl);
+        if (w && w.hp) {
+            hp_feed(w.hp, 1, (const uint8_t *)buf, (size_t)r,
+                    (__bridge void *)w, lc_on_msg);
+        }
     }
     return r;
 }
@@ -379,26 +579,66 @@ static int lc_ssl_read(void *ssl, void *buf, int num) {
 void LCHookSSL(void) {
     if (gSslHooked) return;
 
-    void *rw = lc_find_sym("_SSL_write");
-    void *rr = lc_find_sym("_SSL_read");
+    static int tries = 0;
+    if (tries >= 4) return;      // 符号一启动就在,重复扫 60MB 没意义
+    tries++;
+
+    void *rw = lc_lookup("_SSL_write", "SSL_write");
+    void *rr = lc_lookup("_SSL_read",  "SSL_read");
+    lc_diag(@"lookup write=%p read=%p", rw, rr);
     if (!rw || !rr) {
-        snprintf(gSslInfo, sizeof(gSslInfo), "ssl:not-found w=%p r=%p", rw, rr);
+        snprintf(gHookMode, sizeof(gHookMode), "ssl:not-found w=%p r=%p", rw, rr);
         return;
     }
 
+    gOrigSNI = (const char *(*)(void *, int))lc_lookup("_SSL_get_servername",
+                                                       "SSL_get_servername");
+
+    // 第一优先:数据段槽位重绑。所有经过 PLT 的调用都会命中,
+    // 且不修改任何代码页,不会因为代码签名保护崩掉。
+    int fw = 0, fr = 0;
+    int slotW = lc_rebind_main((uint64_t)(uintptr_t)rw, (void *)lc_ssl_write, &fw);
+    int slotR = lc_rebind_main((uint64_t)(uintptr_t)rr, (void *)lc_ssl_read,  &fr);
+    lc_diag(@"rebind write slots=%d fail=%d | read slots=%d fail=%d",
+            slotW, fw, slotR, fr);
+
+    // 兜底:槽位没找到(例如调用来自 dlsym)才做 inline hook
+    int pw = -100, pr = -100;
     void *tw = NULL, *tr = NULL;
-    int e1 = lc_patch(rw, (void *)lc_ssl_write, &tw);
-    int e2 = lc_patch(rr, (void *)lc_ssl_read, &tr);
-
-    if (e1 == 0) gOrigWrite = (int (*)(void *, const void *, int))tw;
-    if (e2 == 0) gOrigRead  = (int (*)(void *, void *, int))tr;
-
-    if (e1 == 0 || e2 == 0) {
-        gSslHooked = 1;
-        snprintf(gSslInfo, sizeof(gSslInfo), "ssl:ok write=%d read=%d", e1, e2);
-        NSLog(@"[LC] SSL hooked %s", gSslInfo);
-    } else {
-        snprintf(gSslInfo, sizeof(gSslInfo), "ssl:patch-fail w=%d r=%d", e1, e2);
-        NSLog(@"[LC] SSL patch failed %s", gSslInfo);
+    if (slotW == 0 && gAllowPatch) {
+        pw = lc_patch(rw, (void *)lc_ssl_write, &tw);
+        lc_diag(@"patch write => %d tramp=%p", pw, tw);
     }
+    if (slotR == 0 && gAllowPatch) {
+        pr = lc_patch(rr, (void *)lc_ssl_read, &tr);
+        lc_diag(@"patch read => %d tramp=%p", pr, tr);
+    }
+    if (!gAllowPatch) lc_diag(@"patch disabled (safe mode)");
+
+    // 原函数来源:patch 成功时必须走 trampoline,否则递归到死
+    gOrigWrite = (pw == 0) ? (int (*)(void *, const void *, int))tw
+                           : (int (*)(void *, const void *, int))rw;
+    gOrigRead  = (pr == 0) ? (int (*)(void *, void *, int))tr
+                           : (int (*)(void *, void *, int))rr;
+
+    if (slotW || slotR || pw == 0 || pr == 0) {
+        gSslHooked = 1;
+        snprintf(gHookMode, sizeof(gHookMode),
+                 "ssl:ok slot(w%d,r%d) patch(w%d,r%d)",
+                 slotW, slotR, pw, pr);
+        NSLog(@"[LC] %s", gHookMode);
+        lc_diag(@"hook ready: %s", gHookMode);
+    } else {
+        snprintf(gHookMode, sizeof(gHookMode),
+                 "ssl:fail slot(w%d,r%d) patch(w%d,r%d)",
+                 slotW, slotR, pw, pr);
+        NSLog(@"[LC] %s", gHookMode);
+    }
+}
+
+const char *LCSslInfo(void) {
+    static char buf[192];
+    snprintf(buf, sizeof(buf), "%s rw=%llu rd=%llu sslrec=%d",
+             gHookMode, gRawW, gRawR, gSslSeen);
+    return buf;
 }
