@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v2.1.0"
+#define LC_VER @"v2.2.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
