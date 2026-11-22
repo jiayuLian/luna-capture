@@ -333,12 +333,16 @@ static BOOL LCInternalHas(NSString *k) {
         }];
     }
 
+    NSMutableString *cmt = [NSMutableString stringWithString:(LCStatString() ?: @"")];
+    NSString *crash = LCCrashTail();
+    if (crash.length) [cmt appendFormat:@" | lastCrash:%@", crash];
+
     return @{
         @"log": @{
             @"version": @"1.2",
             @"creator": @{@"name": @"LunaCapture",
                           @"version": LC_VER,
-                          @"comment": LCStatString() ?: @""},
+                          @"comment": cmt},
             @"entries": entries
         }
     };
