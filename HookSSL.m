@@ -27,6 +27,7 @@
 #include <pthread.h>
 #include <zlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
@@ -317,9 +318,28 @@ static void lc_diag(NSString *fmt, ...) {
 
 #pragma mark - 符号定位
 
-// 只接受"已定义在某个 section 里"的符号。
-// v1.5.0 就死在这一步:SSL_read 在主二进制里是 N_UNDF,n_value 为 0,
-// 加上 slide 之后得到一个非 NULL 的野指针,后面 memcpy 直接 EXC_BAD_ACCESS。
+// 文件偏移 -> 内存地址。
+// 关键点:__LINKEDIT 的 (vmaddr - fileoff) 通常不等于 __TEXT 的。
+// boringssl 这里差 0x4000,直接用 mh+symoff 会整体偏移,读出来的
+// n_strx 是垃圾,strs+垃圾 越界就是启动即崩。
+static uint8_t *lc_fileoff_ptr(const struct mach_header_64 *mh, intptr_t slide,
+                               uint32_t fileoff) {
+    const uint8_t *p = (const uint8_t *)(mh + 1);
+    for (uint32_t c = 0; c < mh->ncmds; c++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
+            if (fileoff >= sg->fileoff && fileoff < sg->fileoff + sg->filesize) {
+                return (uint8_t *)(uintptr_t)(slide + sg->vmaddr + (fileoff - sg->fileoff));
+            }
+        }
+        p += lc->cmdsize;
+    }
+    return NULL;
+}
+
+// 只接受"已定义在某个 section 里"的符号(N_SECT)。
+// N_UNDF 的 n_value 是 0,当有效地址用会得到野指针。
 static void *lc_sym_defined(const struct mach_header_64 *mh, intptr_t slide,
                             const char *want) {
     if (!mh || mh->magic != MH_MAGIC_64) return NULL;
@@ -329,17 +349,27 @@ static void *lc_sym_defined(const struct mach_header_64 *mh, intptr_t slide,
         const struct load_command *lc = (const struct load_command *)p;
         if (lc->cmd == LC_SYMTAB) {
             const struct symtab_command *st = (const struct symtab_command *)lc;
-            const struct nlist_64 *syms =
-                (const struct nlist_64 *)((const uint8_t *)mh + st->symoff);
-            const char *strs = (const char *)mh + st->stroff;
-            for (uint32_t k = 0; k < st->nsyms; k++) {
-                if (syms[k].n_un.n_strx == 0) continue;
-                if (syms[k].n_type & N_STAB) continue;
-                if ((syms[k].n_type & N_TYPE) != N_SECT) continue;   // 必须是已定义
-                if (syms[k].n_value == 0) continue;
-                const char *nm = strs + syms[k].n_un.n_strx;
+            uint8_t *syms = lc_fileoff_ptr(mh, slide, st->symoff);
+            uint8_t *strs = lc_fileoff_ptr(mh, slide, st->stroff);
+            if (!syms || !strs) return NULL;
+
+            uint32_t n = st->nsyms;
+            if (n > 300000u) n = 300000u;      // boringssl 约 4 万,给足余量
+            for (uint32_t k = 0; k < n; k++) {
+                struct nlist_64 sy;
+                memcpy(&sy, syms + (size_t)k * sizeof(struct nlist_64),
+                       sizeof(struct nlist_64));
+                uint32_t strx = sy.n_un.n_strx;
+                if (strx == 0 || strx >= st->strsize) continue;
+                if (sy.n_type & N_STAB) continue;
+                if ((sy.n_type & N_TYPE) != N_SECT) continue;
+                if (sy.n_value == 0) continue;
+
+                const char *nm = (const char *)(strs + strx);
+                size_t room = st->strsize - strx;
+                if (strnlen(nm, room) >= room) continue;   // 没有结束符,跳过
                 if (strcmp(nm, want) == 0) {
-                    return (void *)(uintptr_t)(syms[k].n_value + slide);
+                    return (void *)(uintptr_t)(sy.n_value + slide);
                 }
             }
         }
@@ -502,9 +532,17 @@ static int lc_patch(void *target, void *replace, void **trampoline_out) {
         return -4;
     }
 
-    code[0] = 0x58000050u;
-    code[1] = 0xD61F0200u;
+    // 先写目标地址,再用一条 8 字节 store 原子替换前两条指令。
+    // 分两次写 4 字节的话,另一个线程可能取到"ldr+原指令"这种半成品。
+    if (((uintptr_t)target & 7) != 0) {
+        munmap(tr, 4096);
+        vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false,
+                   VM_PROT_READ | VM_PROT_EXECUTE);
+        return -6;
+    }
     *(uint64_t *)&code[2] = (uint64_t)replace;
+    __asm__ __volatile__("dmb ish" ::: "memory");
+    *(volatile uint64_t *)code = 0xD61F020058000050ULL;   // ldr x16,#8 ; br x16
     sys_icache_invalidate(target, 16);
 
     vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false,
