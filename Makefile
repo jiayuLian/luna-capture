@@ -7,7 +7,7 @@ PACKAGE_VERSION = 1.0.0
 include $(THEOS)/makefiles/common.mk
 
 LIBRARY_NAME = luna_capture
-luna_capture_FILES = Entry.m Capture.m HAR.m FloatUI.m
+luna_capture_FILES = Entry.m Capture.m FloatUI.m
 luna_capture_FRAMEWORKS = Foundation UIKit
 luna_capture_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
 luna_capture_LDFLAGS = -undefined dynamic_lookup
