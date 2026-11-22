@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v1.5.0"
+#define LC_VER @"v1.6.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -55,6 +55,8 @@ BOOL LCTryClaimURL(NSString *url, NSString *method);
 // BoringSSL 层:inline hook SSL_read / SSL_write,拿 TLS 明文。
 // 业务请求不经 NSURLSession 时,这是唯一能拿到内容的地方。
 void LCHookSSL(void);
+void LCSetSSLMode(BOOL allowPatch);   // NO = 安全模式,只做数据段重绑
+void LCDiagLine(NSString *line);       // 往 Documents/lc_ssl.txt 追加一行
 int  LCSslHooked(void);
 int  LCSslSeen(void);
 const char *LCSslInfo(void);
