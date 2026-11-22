@@ -108,6 +108,7 @@ static void LCRetryTTNet(int tries) {
     LCHookTTNet();
     LCHookSession();      // delegate 类可能后加载,一并重试
     LCHookSSL();          // boringssl.framework 加载后才能定位符号
+    LCAdHookInstall();    // 激励视频的 bridge 类由 Lynx 页面加载后才有
     if (tries < 20) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
