@@ -23,6 +23,7 @@
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <sys/mman.h>
+#include <libkern/OSCacheControl.h>
 #include <pthread.h>
 #include <zlib.h>
 #include <stdio.h>
@@ -294,7 +295,7 @@ static int lc_patch(void *target, void *replace, void **trampoline_out) {
     *(uint64_t *)(tr + 24) = (uint64_t)((uint8_t *)target + 16);
 
     mprotect(tr, 4096, PROT_READ | PROT_EXEC);
-    __builtin___clear_cache((char *)tr, (char *)tr + 32);
+    sys_icache_invalidate(tr, 32);
 
     uintptr_t page = (uintptr_t)target & ~0xFFFULL;
     kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x2000,
@@ -308,7 +309,7 @@ static int lc_patch(void *target, void *replace, void **trampoline_out) {
     code[0] = 0x58000050u;
     code[1] = 0xD61F0200u;
     *(uint64_t *)&code[2] = (uint64_t)replace;
-    __builtin___clear_cache((char *)target, (char *)target + 16);
+    sys_icache_invalidate(target, 16);
 
     vm_protect(mach_task_self(), (vm_address_t)page, 0x2000, false,
                VM_PROT_READ | VM_PROT_EXECUTE);
