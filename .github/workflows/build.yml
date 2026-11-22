@@ -48,10 +48,11 @@ jobs:
             echo "FAIL: substrate dependency leaked"; exit 1
           fi
           echo "--- version marker ---"
-          strings dist/luna_capture.dylib | grep -F "v1.4.1" || { echo "FAIL: no version marker"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "v1.5.0" || { echo "FAIL: no version marker"; exit 1; }
           echo "--- channels ---"
           strings dist/luna_capture.dylib | grep -F "TTHttpTask" >/dev/null || { echo "FAIL: no ttnet class"; exit 1; }
           strings dist/luna_capture.dylib | grep -F "didReceiveData" >/dev/null || { echo "FAIL: no session delegate"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "SSL_write" >/dev/null || { echo "FAIL: no ssl hook"; exit 1; }
           echo "channels ok"
           echo "--- size ---"
           ls -l dist/luna_capture.dylib
