@@ -120,7 +120,7 @@ static UIViewController *LCAppVC(void) {
 
     CGFloat pw = 250;
     CGFloat rowH = 46;
-    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"清空记录", @"关闭菜单"];
+    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"自动领奖", @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - pw) / 2.0,
@@ -148,7 +148,9 @@ static UIViewController *LCAppVC(void) {
         row.tag = i;
         row.titleLabel.font = [UIFont systemFontOfSize:16];
         [row setTitle:titles[(NSUInteger)i] forState:UIControlStateNormal];
-        UIColor *c = (i == 2) ? [UIColor systemRedColor] : [UIColor darkTextColor];
+        UIColor *c = [UIColor darkTextColor];
+        if (i == 2) c = [UIColor systemBlueColor];      // 自动领奖
+        if (i == 3) c = [UIColor systemRedColor];       // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -176,7 +178,8 @@ static UIViewController *LCAppVC(void) {
     switch (sender.tag) {
         case 0: [self lcExport:YES]; break;
         case 1: [self lcExport:NO];  break;
-        case 2:
+        case 2: [self runAutoClaim]; break;
+        case 3:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;
@@ -184,6 +187,49 @@ static UIViewController *LCAppVC(void) {
             [self hideMenu];
             break;
     }
+}
+
+// 自动领奖:走 App 自己的网络层发 do_action,签名与设备指纹由 App 生成。
+// 先把菜单收起,否则日志 toast 会被遮罩挡住。
+- (void)runAutoClaim {
+    [self hideMenu];
+
+    if (LCAutoBusy()) {
+        [self toast:@"上一轮还在跑,稍等"];
+        return;
+    }
+    if (!LCAutoPrepare()) {
+        [self toast:@"先打开一次金币页再运行"];
+        return;
+    }
+
+    [self toast:@"开始领奖,约 20 秒"];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        LCAutoRun();
+    });
+
+    // 轮询结果,结束后把日志尾部弹出来
+    __block NSInteger waited = 0;
+    __weak typeof(self) ws = self;
+    __block void (^poll)(void) = nil;
+    poll = ^{
+        waited += 3;
+        if (LCAutoBusy() && waited < 90) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), poll);
+            return;
+        }
+        NSString *log = LCAutoLogText();
+        NSArray *lines = [log componentsSeparatedByString:@"\n"];
+        NSUInteger n = lines.count;
+        NSString *tail = n > 3 ? [[lines subarrayWithRange:NSMakeRange(n - 3, 3)]
+                                  componentsJoinedByString:@"\n"] : log;
+        [ws toast:tail.length ? tail : @"没有可领的任务"];
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), poll);
 }
 
 // 方法名不能叫 export:,那是 UIResponder 自带的(iOS 16+),会撞签名
