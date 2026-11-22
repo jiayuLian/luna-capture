@@ -107,6 +107,7 @@ static void LCExceptionHandler(NSException *e) {
 static void LCRetryTTNet(int tries) {
     LCHookTTNet();
     LCHookSession();      // delegate 类可能后加载,一并重试
+    LCHookSSL();          // boringssl.framework 加载后才能定位符号
     if (tries < 20) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -129,6 +130,8 @@ static void LCStartupSchedulers(void) {
             LCHookSession();
             // 辅通道:TTNet 的零参数启动方法(若 task 不走 NSURLSession)
             LCHookTTNet();
+            // 主力:业务请求走 Cronet,只有 BoringSSL 层能拿到明文
+            LCHookSSL();
             LCRetryTTNet(0);
         } else {
             LCHookInfo = @"safe-mode(上次启动崩溃,TTNet 通道已禁用)";
