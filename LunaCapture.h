@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v3.8.1"
+#define LC_VER @"v3.9.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -79,6 +79,9 @@ void LCAdStop(void);  // 立刻停掉循环,当前这一轮广告不强制关
 // 内部状态机: 金币任务页点「领时长」→ 活动页点广告按钮 → lucky hook 接管广告。
 void LCAutoDuration(NSInteger times);
 BOOL LCAdOpenDurationPage(void);   // 只打开活动页，用于单独验证路由
+// 连续刷视频(任务 601232 luna_treasure_draw_duration):点「去完成」→ 看激励视频
+// → 自动关 → 冷却 300 秒 → 再来。上限 20 次/天。
+void LCAutoDraw(NSInteger times);
 // 卡死自救:广告 VC 被 present 到错误 window 时,App 主 window 会永久停在
 // 全屏 BDARVLoadingView 上。摘掉遮罩 + dismiss 残留,返回处理掉的视图数。
 NSInteger LCAdCleanupStuck(void);

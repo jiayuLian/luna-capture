@@ -38,6 +38,7 @@
 - (void)runAutoClaim;
 - (void)runAutoAd;
 - (void)runAutoDuration;
+- (void)runAutoDraw;
 - (void)cleanStuckAd;
 - (void)stopAutoAd;
 - (void)exportLog;
@@ -137,8 +138,8 @@ static UIViewController *LCAppVC(void) {
     CGFloat rowH = 46;
     NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"导出日志", @"导出界面树",
                         @"自动领奖", @"广告全自动 ×20", @"领时长 ×3",
-                        @"打开领时长页", @"清理卡住的广告", @"停止广告",
-                        @"清空记录", @"关闭菜单"];
+                        @"刷视频 ×3", @"打开领时长页", @"清理卡住的广告",
+                        @"停止广告", @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - pw) / 2.0,
@@ -169,11 +170,11 @@ static UIViewController *LCAppVC(void) {
         UIColor *c = [UIColor darkTextColor];
         if (i == 2) c = [UIColor systemGreenColor];     // 导出日志
         if (i == 3) c = [UIColor systemTealColor];      // 导出界面树
-        if (i == 4 || i == 5 || i == 6) c = [UIColor systemBlueColor];   // 领奖 / 广告 / 时长
-        if (i == 7) c = [UIColor systemIndigoColor];    // 打开领时长页
-        if (i == 8) c = [UIColor systemPurpleColor];    // 清理卡住的广告
-        if (i == 9) c = [UIColor systemOrangeColor];    // 停止
-        if (i == 10) c = [UIColor systemRedColor];      // 清空记录
+        if (i >= 4 && i <= 7) c = [UIColor systemBlueColor];   // 领奖 / 广告 / 时长 / 刷视频
+        if (i == 8) c = [UIColor systemIndigoColor];    // 打开领时长页
+        if (i == 9) c = [UIColor systemPurpleColor];    // 清理卡住的广告
+        if (i == 10) c = [UIColor systemOrangeColor];   // 停止
+        if (i == 11) c = [UIColor systemRedColor];      // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -210,7 +211,8 @@ static UIViewController *LCAppVC(void) {
         case 4: [self runAutoClaim]; break;
         case 5: [self runAutoAd]; break;
         case 6: [self runAutoDuration]; break;
-        case 7:
+        case 7: [self runAutoDraw]; break;
+        case 8:
             [self hideMenu];
             if (LCAdOpenDurationPage()) {
                 [self toast:@"已发出 openURL\n看日志里的结果是 OK 还是失败"];
@@ -218,12 +220,12 @@ static UIViewController *LCAppVC(void) {
                 [self toast:@"还没有 schema\n先在金币页停一会儿再试"];
             }
             break;
-        case 8:
+        case 9:
             [self hideMenu];
             [self cleanStuckAd];
             break;
-        case 9: [self stopAutoAd]; break;
-        case 10:
+        case 10: [self stopAutoAd]; break;
+        case 11:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;
@@ -331,6 +333,23 @@ static UIViewController *LCAppVC(void) {
     for (NSInteger i = 1; i <= 4; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(i * 75 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
+    }
+}
+
+- (void)runAutoDraw {
+    [self hideMenu];
+    if (LCAdBusy()) {
+        [self toast:@"广告还在跑，先停掉"];
+        return;
+    }
+    LCAutoDraw(3);
+    [self toast:@"刷视频:点「去完成」→看视频→自动关\n每轮约 5 分钟冷却，共 3 次"];
+
+    __weak typeof(self) ws = self;
+    for (NSInteger i = 1; i <= 8; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(i * 90 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
     }
 }

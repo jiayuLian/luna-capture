@@ -28,6 +28,7 @@
 #import "LunaCapture.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
+#include <string.h>
 
 void LCAutoLog(NSString *fmt, ...);
 
@@ -71,6 +72,13 @@ static NSInteger gDurDone   = 0;
 static BOOL      gDurActive = NO;    // 接管中:广告关一次才记一次
 static NSTimeInterval gDurTapAt = 0;
 static NSTimer  *gDurTimer  = nil;
+// 连续刷视频（任务 601232）的状态。同样要放顶部，LCScheduleNext 要记账。
+static NSInteger gDrawRemain = 0;
+static NSInteger gDrawDone   = 0;
+static BOOL      gDrawActive = NO;
+static NSTimeInterval gDrawTapAt  = 0;
+static NSTimeInterval gDrawCoolAt = 0;
+static NSTimer  *gDrawTimer = nil;
 static NSInteger gAdTotalCount = 0;
 static NSTimeInterval gAdPlayStart = 0;
 static NSTimeInterval gAdOpenAt = 0;
@@ -287,6 +295,162 @@ static UIView *LCFindControlByText(UIView *v, NSArray<NSString *> *texts, int de
         if (hit) return hit;
     }
     return nil;
+}
+
+#pragma mark - 合成触摸（Lynx 按钮唯一可行的点法）
+
+// 金币任务页整页是 Lynx 画的：内容在 LunaTabBarSlidingScrollView 里，
+// 再套 BDXView → BDXLynxView → LynxView，卡片和按钮全是 UILynxView。
+// 这些按钮既不是 UIControl，也没有 accessibilityLabel（文字在兄弟 LynxTextView 上），
+// sendActions / accessibilityActivate / 手势 target 三条路全是死的 ——
+// Lynx 只认 UIResponder 的 touchesBegan/Ended，而且要从 UITouch 里读坐标。
+//
+// 所以这里直接按 ivar 偏移写一个 UITouch，再喂给 LynxView。
+// UITouch 没有公开构造器，但字段布局是固定的：_view/_window/_phase/
+// _locationInWindow/_previousLocationInWindow/_timestamp/_tapCount。
+static BOOL LCSetIvar(id obj, const char *name, const void *src, size_t size) {
+    if (!obj || !name) return NO;
+    Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
+    if (!iv) return NO;
+    if ((size_t)ivar_getOffset(iv) == 0) return NO;
+    memcpy((char *)(__bridge void *)obj + ivar_getOffset(iv), src, size);
+    return YES;
+}
+
+static BOOL LCSynthTapAtWindowPoint(UIWindow *win, CGPoint p) {
+    if (!win) return NO;
+    UIView *hit = [win hitTest:p withEvent:nil];
+    if (!hit) return NO;
+
+    // 往上找 LynxView，事件必须喂给它，它才会拿坐标做命中测试
+    UIView *lynx = hit;
+    for (int i = 0; i < 24 && lynx; i++) {
+        if ([NSStringFromClass([lynx class]) isEqualToString:@"LynxView"]) break;
+        lynx = lynx.superview;
+    }
+    if (!lynx) lynx = hit;
+
+    UITouch *t = nil;
+    @try { t = [[UITouch alloc] init]; } @catch (__unused NSException *e) { return NO; }
+    if (!t) return NO;
+
+    UIView   *v  = hit;
+    UIWindow *w  = win;
+    CGPoint   pp = p;
+    NSUInteger tapCount = 1;
+    int phaseBegan = 0;      // UITouchPhaseBegan
+    int phaseEnded = 3;      // UITouchPhaseEnded
+    NSTimeInterval ts = [[NSProcessInfo processInfo] systemUptime];
+
+    LCSetIvar(t, "_view", &v, sizeof(v));
+    LCSetIvar(t, "_window", &w, sizeof(w));
+    LCSetIvar(t, "_locationInWindow", &pp, sizeof(pp));
+    LCSetIvar(t, "_previousLocationInWindow", &pp, sizeof(pp));
+    LCSetIvar(t, "_tapCount", &tapCount, sizeof(tapCount));
+    LCSetIvar(t, "_timestamp", &ts, sizeof(ts));
+
+    NSSet *set = [NSSet setWithObject:t];
+
+    @try {
+        LCSetIvar(t, "_phase", &phaseBegan, sizeof(phaseBegan));
+        [lynx touchesBegan:set withEvent:nil];
+        LCSetIvar(t, "_phase", &phaseEnded, sizeof(phaseEnded));
+        [lynx touchesEnded:set withEvent:nil];
+        return YES;
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+}
+
+// 合成点击某个视图：取它的中心点换算到 window 坐标
+static BOOL LCSynthTapView(UIView *v) {
+    if (!v) return NO;
+    UIWindow *w = v.window;
+    if (!w) return NO;
+    CGPoint c = CGPointMake(v.bounds.size.width / 2.0, v.bounds.size.height / 2.0);
+    CGPoint p = [v convertPoint:c toView:w];
+    return LCSynthTapAtWindowPoint(w, p);
+}
+
+#pragma mark - 卡片按钮定位（金币任务页专用）
+
+// 金币页每张任务卡都是这个结构（实测 04:23 界面树）：
+//   UILynxView (12,142 350x81)            卡片
+//     UILynxView (0,16 350x49)
+//       LynxTextView (0,0 147x25) "连续刷视频赚金币"
+//       UILynxView (265,7 85x36)          按钮（没有文字、没有 label）
+// 按钮统一 85x36，贴卡片右侧。所以只要先按标题文字找到卡片，
+// 再在卡片里挑"最右边那个 80x30 左右的小块"，就是按钮。
+static UIView *LCFindExactText(UIView *v, NSString *want, int depth) {
+    if (!v || v.hidden || v.alpha < 0.03 || depth > 30) return nil;
+    NSString *t = LCTextOfView(v);
+    if (t.length && [t containsString:want]) return v;
+    for (UIView *s in v.subviews) {
+        UIView *h = LCFindExactText(s, want, depth + 1);
+        if (h) return h;
+    }
+    return nil;
+}
+
+// 从文字视图往上找"卡片"：宽度 >= 300 且高度在 60~260 之间
+static UIView *LCCardAncestorOf(UIView *v) {
+    UIView *cur = v;
+    for (int i = 0; i < 12 && cur; i++) {
+        CGRect f = cur.bounds;
+        if (f.size.width >= 300 && f.size.height >= 60 && f.size.height <= 260) return cur;
+        cur = cur.superview;
+    }
+    return v.superview ?: v;
+}
+
+// 在卡片里找按钮：85x36 上下、贴右侧（x 最大）
+static UIView *LCButtonInCard(UIView *card) {
+    if (!card) return nil;
+    __block UIView *best = nil;
+    __block CGFloat bestX = -1;
+    __block void (^walk)(UIView *, int);
+    walk = ^(UIView *v, int d) {
+        if (!v || d > 8) return;
+        CGRect f = v.bounds;
+        BOOL sizeOK = (f.size.width >= 60 && f.size.width <= 120 &&
+                       f.size.height >= 24 && f.size.height <= 52);
+        BOOL isLynx = [NSStringFromClass([v class]) containsString:@"UILynxView"] ||
+                      [v isKindOfClass:[UIControl class]];
+        if (sizeOK && isLynx) {
+            CGPoint p = [v convertPoint:CGPointZero toView:card];
+            if (p.x > bestX && p.x > card.bounds.size.width * 0.55) {
+                bestX = p.x;
+                best = v;
+            }
+        }
+        for (UIView *s in v.subviews) walk(s, d + 1);
+    };
+    walk(card, 0);
+    return best;
+}
+
+// 对外：按卡片标题点它右侧的按钮
+static BOOL LCTapCardButton(NSString *title) {
+    for (UIWindow *w in LCAllWindows()) {
+        UIView *txt = LCFindExactText(w, title, 0);
+        if (!txt) continue;
+        UIView *card = LCCardAncestorOf(txt);
+        UIView *btn = LCButtonInCard(card);
+        if (btn) {
+            BOOL ok = LCSynthTapView(btn);
+            LCAutoLog(@"[tap] 「%@」卡片按钮 <%@ %.0fx%.0f> %@",
+                      title, NSStringFromClass([btn class]),
+                      btn.bounds.size.width, btn.bounds.size.height,
+                      ok ? @"已点击" : @"点不动");
+            if (ok) return YES;
+        }
+        // 退一步：直接点文字本身
+        BOOL ok2 = LCSynthTapView(txt);
+        LCAutoLog(@"[tap] 「%@」没找到按钮，点文字 <%@> %@",
+                  title, NSStringFromClass([txt class]), ok2 ? @"已点击" : @"点不动");
+        return ok2;
+    }
+    return NO;
 }
 
 // 从 UIGestureRecognizerTarget 里把 target/action 抠出来。
@@ -673,6 +837,14 @@ static void LCTick(void) {
                     gDurRemain--;
                     gDurTapAt = 0;
                 }
+                if (gDrawActive) {
+                    LCAutoLog(@"[draw] 这条广告 %ld 秒没结束，跳过",
+                              (long)(gAdPlaySeconds + 90));
+                    gDrawActive = NO;
+                    gDrawRemain--;
+                    gDrawTapAt = 0;
+                    gDrawCoolAt = [[NSDate date] timeIntervalSince1970];
+                }
                 LCAutoLog(@"[ad] %ld 秒还没结束，放弃本轮（界面可能卡在广告页）",
                           (long)(gAdPlaySeconds + 90));
                 gAdSawClose = YES;
@@ -703,6 +875,22 @@ static void LCScheduleNext(void) {
     if (!gAdBusy) return;
     if (gAdRemain <= 0) {
         gAdBusy = NO;
+        if (gDrawActive) {
+            // 连续刷视频：一条广告关掉才算一次，并进入 300 秒冷却
+            gDrawActive = NO;
+            gDrawDone++;
+            gDrawRemain--;
+            gDrawTapAt = 0;
+            gDrawCoolAt = [[NSDate date] timeIntervalSince1970];
+            LCAutoLog(@"[draw] 第 %ld 次完成，剩 %ld 次，冷却 5 分钟",
+                      (long)gDrawDone, (long)gDrawRemain);
+            if (gDrawRemain <= 0 && gDrawTimer) {
+                [gDrawTimer invalidate];
+                gDrawTimer = nil;
+                LCAutoLog(@"[draw] 全部完成，共 %ld 次", (long)gDrawDone);
+            }
+            return;
+        }
         if (gDurActive) {
             // 领时长：一条广告关掉才算一次
             gDurActive = NO;
@@ -901,19 +1089,29 @@ void LCAdHookInstall(void) {
 // 任务页每次刷新都会重新生成 token(抓包里连续 4 次刷新 4 个不同 token)，
 // 所以每轮结束后 App 自己刷任务页时就能白拿一个新 token。
 // addRecord 侧的入口：只计数，不打日志
+static volatile int gTaskLastLen = 0;
+static volatile int gTaskLastB64 = 0;
+static volatile int gTaskShort = 0;
+
 void LCAdNoteTaskPage(NSString *body, BOOL isBase64) {
     gTaskPageSeen++;
-    if (isBase64 || body.length < 200) return;
+    gTaskLastLen = (int)body.length;
+    gTaskLastB64 = isBase64 ? 1 : 0;
+    if (isBase64 || body.length < 200) { gTaskShort++; return; }
     gTaskPageParsed++;
     LCAdNotePageResponse(body);
 }
 
 // 导出日志时打一行，代替原来每条都打
 void LCAdTaskPageStats(void) {
-    LCAutoLog(@"[ad] 任务页命中 %d 次，其中可解析 %d 次，最新 token %@",
-              LCAdTaskPageSeen(), LCAdTaskPageParsed(),
+    LCAutoLog(@"[ad] 任务页命中 %d 次，可解析 %d 次，被跳过 %d 次 "
+              @"(最后一条 %dB b64=%d)，token %@，schema %@",
+              LCAdTaskPageSeen(), LCAdTaskPageParsed(), gTaskShort,
+              gTaskLastLen, gTaskLastB64,
               gAdFreshToken ? [NSString stringWithFormat:@"%luB",
-                               (unsigned long)gAdFreshToken.length] : @"无");
+                               (unsigned long)gAdFreshToken.length] : @"无",
+              gDurSchema ? [NSString stringWithFormat:@"%luB",
+                            (unsigned long)gDurSchema.length] : @"无");
 }
 
 void LCAdNotePageResponse(NSString *body) {
@@ -1289,7 +1487,15 @@ static void LCDurationTick(void) {
         return;
     }
 
-    // ② 用 schema 打开活动页。优先于文案点击 —— 金币页的按钮根本点不动。
+    // ② 金币任务卡里的「领时长」按钮。整页是 Lynx 画的，只能合成触摸。
+    if (LCTapCardButton(@"攒时长 听歌不中断")) {
+        gDurTapAt = now;
+        gDurActive = YES;
+        LCAdBeginExternal();
+        return;
+    }
+
+    // ③ 用 schema 打开活动页（合成触摸也不灵时的备用）
     // 活动页加载要时间，25 秒内不重复 openURL，否则会一直重跳。
     if (gDurSchema.length > 20 && gDurOpenFails < 3 &&
         (gDurOpenAt <= 0 || now - gDurOpenAt > 25)) {
@@ -1299,7 +1505,7 @@ static void LCDurationTick(void) {
         gDurOpenFails++;
     }
 
-    // ③ 实在没有 schema 才退回文案点击
+    // ④ 实在没有 schema 才退回文案点击
     btn = LCFindByTextAnywhere(LCDurationEntryTexts());
     if (btn) {
         gDurTapAt = now;
@@ -1334,6 +1540,61 @@ BOOL LCAdOpenDurationPage(void) {
     BOOL ok = LCOpenSchema(gDurSchema);
     LCAutoLog(@"[dur] 手动打开活动页 -> %@", ok ? @"已发出" : @"失败");
     return ok;
+}
+
+#pragma mark - 连续刷视频（任务 601232 luna_treasure_draw_duration）
+
+// 点「连续刷视频赚金币」卡片右侧的「去完成」→ 拉起激励视频（rit=73032）
+// → 播完自动关 → 领金币 → 冷却 300 秒（服务端 countdown_config.end_time
+//   减 last_completed_time 实测正好 300）→ 再来。
+// 上限 20 次/天（stats.total_times）。
+static void LCAutoDrawTick(void) {
+    if (gDrawRemain <= 0) {
+        [gDrawTimer invalidate];
+        gDrawTimer = nil;
+        LCAutoLog(@"[draw] 全部完成，共 %ld 次", (long)gDrawDone);
+        return;
+    }
+    if (gAdPlaying || gAdOpening) return;      // 广告在走，等它
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    // 冷却期：服务端 300 秒，多给 15 秒余量
+    if (gDrawCoolAt > 0 && now - gDrawCoolAt < 315) {
+        return;
+    }
+    if (gDrawTapAt > 0 && now - gDrawTapAt < 8) return;
+
+    if (LCTapCardButton(@"连续刷视频赚金币")) {
+        gDrawTapAt = now;
+        gDrawCoolAt = 0;
+        gDrawActive = YES;
+        LCAdBeginExternal();
+        return;
+    }
+
+    // 找不到按钮 —— 可能还在冷却（按钮文案变成倒计时），也可能页面滚走了
+    static NSTimeInterval lastWarn = 0;
+    if (now - lastWarn > 30) {
+        lastWarn = now;
+        LCAutoLog(@"[draw] 没找到「连续刷视频赚金币」的按钮，抓一次界面树");
+        LCDumpAdViewTree();
+    }
+}
+
+void LCAutoDraw(NSInteger times) {
+    if (times <= 0) times = 1;
+    if (times > 20) times = 20;
+    gDrawRemain = times;
+    gDrawDone = 0;
+    gDrawActive = NO;
+    gDrawTapAt = 0;
+    gDrawCoolAt = 0;
+    LCAutoLog(@"[draw] 开始连续刷视频 ×%ld（每轮约 5 分钟冷却）", (long)times);
+    if (gDrawTimer) [gDrawTimer invalidate];
+    gDrawTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                 repeats:YES
+                                                   block:^(NSTimer *t) { LCAutoDrawTick(); }];
+    LCAutoDrawTick();
 }
 
 void LCAutoDuration(NSInteger times) {
