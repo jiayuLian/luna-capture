@@ -42,6 +42,21 @@ static void LCWriteState(NSString *s) {
 
 static NSUncaughtExceptionHandler *gPrevHandler = NULL;
 
+// 把上次崩溃的异常摘要塞进 HAR 的 comment。
+// 闪退时用户往往拿不到 .ips,但只要 App 能再次启动就能导出 HAR,
+// 这条尾巴就是定位崩溃点的唯一线索。
+NSString *LCCrashTail(void) {
+    NSString *d = LCStateDir();
+    if (!d.length) return nil;
+    NSString *p = [d stringByAppendingPathComponent:@"lc_crash.log"];
+    NSString *s = [NSString stringWithContentsOfFile:p
+                                           encoding:NSUTF8StringEncoding
+                                              error:NULL];
+    if (!s.length) return nil;
+    if (s.length > 1600) s = [s substringToIndex:1600];
+    return [s stringByReplacingOccurrencesOfString:@"\n" withString:@" | "];
+}
+
 static void LCExceptionHandler(NSException *e) {
     @try {
         NSMutableString *s = [NSMutableString string];
