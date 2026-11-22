@@ -28,9 +28,27 @@ NSString *LCStatString(void) {
 #pragma mark - 反射 dump
 
 // 属性读取白名单:只读对象类型,跳过 C 标量与 NSObject 自带实现
+static BOOL LCOwnershipOK(const char *attrs) {
+    // 逐段扫逗号后的修饰符,避免把类型名里的字母误判成修饰符。
+    // 只认单独的 &(strong) / C(copy) / W(weak)。
+    const char *p = attrs;
+    while ((p = strchr(p, ',')) != NULL) {
+        p++;
+        char c = *p;
+        if ((c == '&' || c == 'C' || c == 'W') && (p[1] == ',' || p[1] == '\0')) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static BOOL LCPropReadable(const char *name, const char *attrs) {
     if (!name || !attrs) return NO;
     if (strncmp(attrs, "T@", 2) != 0) return NO;
+    // 内存语义必须是 strong / copy / weak。
+    // 缺省语义是 assign,getter 可能返回已释放的野指针,
+    // 对它调 isKindOfClass: 就是 EXC_BAD_ACCESS。
+    if (!LCOwnershipOK(attrs)) return NO;
 
     static NSSet *black = nil;
     static dispatch_once_t once;
@@ -365,37 +383,67 @@ static void LCTrackTask(id task) {
 
 #pragma mark - 通用转发
 
-static NSMutableDictionary<NSString *, NSValue *> *gOrigIMP = nil;
+// 用 Method 指针做 key,不是 class+sel。
+//
+// 这是上一版闪退的根因:class_copyMethodList 只列出「本类实现」的方法,
+// 所以表里存的是 (类, sel) 这一对。一旦 App 通过子类调用继承来的同一个
+// 方法,object_getClass(self) 是子类,查表落空 → 旧代码直接 return nil,
+// 调用者拿到一个不该为 nil 的返回值继续解引用,当场 EXC_BAD_ACCESS。
+//
+// Method 是同一个结构体指针,父类和子类共用,用它做 key 天然覆盖继承。
+static NSMapTable *gOrigIMPs = nil;
 static NSLock *gIMPock = nil;
 
 static void LCEnsureIMPTable(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        gOrigIMP = [NSMutableDictionary dictionary];
+        gOrigIMPs = [NSMapTable mapTableWithKeyOptions:
+                     (NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality)
+                                          valueOptions:NSPointerFunctionsStrongMemory];
         gIMPock = [NSLock new];
     });
 }
 
-static void *LCOrigIMPFor(Class cls, SEL sel) {
-    if (!gOrigIMP) return NULL;
-    NSString *k = [NSString stringWithFormat:@"%p|%p", cls, sel];
+static void *LCOrigIMPForMethod(Method m) {
+    if (!m || !gOrigIMPs) return NULL;
     [gIMPock lock];
-    NSValue *v = gOrigIMP[k];
+    NSValue *v = [gOrigIMPs objectForKey:(__bridge id)(void *)m];
     void *p = v ? [v pointerValue] : NULL;
     [gIMPock unlock];
     return p;
 }
 
+static void LCSetOrigIMP(Method m, IMP imp) {
+    if (!m || !gOrigIMPs) return;
+    [gIMPock lock];
+    [gOrigIMPs setObject:[NSValue valueWithPointer:(void *)imp]
+                  forKey:(__bridge id)(void *)m];
+    [gIMPock unlock];
+}
+
+// 同一条调用链上重入同一实现的深度保护。
+// 正常网络方法不会递归,超过这个深度说明 IMP 表出了问题,直接放行不再记录,
+// 避免无栈可用。
+static __thread int gForwardDepth = 0;
+
+
 // 统一入口:不假设方法签名,用 NSInvocation 原样转发,
 // 唯一动作是取出返回的 task 对象做旁路观察。
 static id LCForward(id self, SEL _cmd, ...) {
     Class cls = object_getClass(self);
-    void *op = LCOrigIMPFor(cls, _cmd);
+    Method m = class_getInstanceMethod(cls, _cmd);
+    void *op = LCOrigIMPForMethod(m);
 
-    // 拿不到原实现就直接返回,绝不返回伪造值让上层继续用
+    // 表里查不到 = 这个 Method 不是我们换的。正常不可能走到,
+    // 真走到了就说明表被破坏,直接返回 nil 比乱调安全。
     if (!op) return nil;
 
-    Method m = class_getInstanceMethod(cls, _cmd);
+    if (gForwardDepth > 32) {
+        // 深度异常,原样放行
+        return ((id (*)(id, SEL, ...))op)(self, _cmd);
+    }
+    gForwardDepth++;
+
     NSMethodSignature *sig = nil;
     if (m) {
         @try {
@@ -406,6 +454,7 @@ static id LCForward(id self, SEL _cmd, ...) {
     }
 
     if (!sig) {
+        gForwardDepth--;
         return ((id (*)(id, SEL, ...))op)(self, _cmd);
     }
 
@@ -449,12 +498,14 @@ static id LCForward(id self, SEL _cmd, ...) {
     va_end(ap);
 
     if (!ok) {
+        gForwardDepth--;
         return ((id (*)(id, SEL, ...))op)(self, _cmd);
     }
 
     @try {
         [inv invoke];
     } @catch (NSException *e) {
+        gForwardDepth--;
         return nil;
     }
 
@@ -468,6 +519,7 @@ static id LCForward(id self, SEL _cmd, ...) {
             } @catch (NSException *e) {}
         }
     }
+    gForwardDepth--;
     return ret;
 }
 
@@ -475,12 +527,13 @@ static id LCForward(id self, SEL _cmd, ...) {
 
 // 浮点参数在 arm64 上走 s0-s7,和 va_arg 的通用寄存器序列不一致,
 // 与浮点参数沾边的方法一律不 hook,宁可少抓也不能崩。
+// 返回类型只接受对象:任务构建方法必然返回 task,返回 void 的一律不碰。
 static BOOL LCSigSupported(Method m) {
     const char *types = method_getTypeEncoding(m);
     if (!types) return NO;
 
     char *rt = method_copyReturnType(m);
-    BOOL retOK = (rt && (*rt == '@' || *rt == 'v'));
+    BOOL retOK = (rt && *rt == '@');
     if (rt) free(rt);
     if (!retOK) return NO;
 
@@ -511,16 +564,12 @@ static int LCSwizzleMethod(Class cls, SEL sel, Method m) {
     if (!LCSigSupported(m)) return 0;
 
     LCEnsureIMPTable();
-    if (LCOrigIMPFor(cls, sel)) return 0;
+    if (LCOrigIMPForMethod(m)) return 0;   // 这个 Method 已经换过
 
     IMP om = method_getImplementation(m);
-    if (om == (IMP)LCForward) return 0;   // 重复安装
+    if (om == (IMP)LCForward) return 0;
 
-    NSString *k = [NSString stringWithFormat:@"%p|%p", cls, sel];
-    [gIMPock lock];
-    gOrigIMP[k] = [NSValue valueWithPointer:(void *)om];
-    [gIMPock unlock];
-
+    LCSetOrigIMP(m, om);
     method_setImplementation(m, (IMP)LCForward);
     return 1;
 }
@@ -610,5 +659,22 @@ void LCHookTTNet(void) {
                       totalHooked, (unsigned long)gHooked.count];
         NSLog(@"[LC] %@", LCHookInfo);
         for (NSString *s in hitNames) NSLog(@"[LC]   hook %@", s);
+
+        // 落盘一份 hook 清单。万一后面崩了,这份名单是唯一能缩小排查范围的线索。
+        NSArray *snapshot = [hitNames copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                NSString *d = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                                   NSUserDomainMask, YES) firstObject];
+                if (!d.length) return;
+                NSMutableString *s = [NSMutableString string];
+                [s appendFormat:@"# %@\n", LC_VER];
+                for (NSString *n in snapshot) [s appendFormat:@"%@\n", n];
+                [s writeToFile:[d stringByAppendingPathComponent:@"lc_hooked.txt"]
+                    atomically:YES
+                      encoding:NSUTF8StringEncoding
+                         error:NULL];
+            } @catch (NSException *e) {}
+        });
     }
 }
