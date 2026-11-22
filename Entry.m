@@ -47,18 +47,19 @@ static void LCWriteTag(NSString *tag) {
 }
 
 static BOOL LCShouldUseFullMode(void) {
+    // v3.6.0 起固定走 safe。
+    // full 模式会额外装 SSL inline hook（改代码页）和 Session/TTNet 两条辅通道。
+    // 实测：每次换版本后第一次启动都会在 full 阶段崩一次，然后降级 —— 用户看到的
+    // 就是"有时候进 APP 闪退"。而 slot 重绑这一条已经足够把请求记全
+    // （HAR 里 21KB 的任务页、60KB 的 preload 都完整），Session/TTNet 早就证伪。
+    // 少一条会崩的路，比多一条可能崩的路值。
     NSString *st = LCReadState();
-    if (st.length == 0) return YES;                 // 首次
+    if (st.length == 0) return NO;                  // 首次也是 safe
 
     NSArray *parts = [st componentsSeparatedByString:@"|"];
     NSString *tag = parts.count > 0 ? parts[0] : @"";
-    NSString *ver = parts.count > 1 ? parts[1] : @"";
-
-    if (![ver isEqualToString:LC_VER]) return YES;  // 版本变了,重新试
-
-    if ([tag isEqualToString:LC_TAG_SAFE]) return NO;      // 降级过,保持
-    if ([tag isEqualToString:LC_TAG_PENDING]) return NO;   // 上次没走完 = 崩了
-    return YES;
+    (void)tag;
+    return NO;
 }
 
 static NSUncaughtExceptionHandler *gPrevHandler = NULL;
@@ -134,7 +135,9 @@ static void LCRetryAdHooks(int tries) {
 static void LCStartupSchedulers(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        BOOL full = LCShouldUseFullMode();
+        // 强制 safe：inline hook 是首启崩溃的唯一已知来源，且非必需
+        BOOL full = NO;
+        (void)LCShouldUseFullMode;
 
         // 先写 pending,10 秒后如果进程还活着再改成 ok / safe-ok
         LCWriteTag(LC_TAG_PENDING);

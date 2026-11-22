@@ -1062,6 +1062,143 @@ void LCAdRun(NSInteger times) {
     });
 }
 
+#pragma mark - 卡死自救
+
+// 广告 VC 被 present 到浮窗 window 时，App 主 window 里会留一个全屏的
+// BDARVLoadingView。广告关掉后它没人移除，整屏点不动，只能杀进程。
+// 这里按类名把它摘掉。
+static NSInteger LCStripLoading(UIView *v, int depth) {
+    if (!v || depth > 40) return 0;
+    NSInteger n = 0;
+    NSString *cn = NSStringFromClass([v class]);
+    BOOL isAdLoading = [cn hasPrefix:@"BDARV"] &&
+                       ([cn containsString:@"Loading"] || [cn containsString:@"Indicator"]);
+    NSArray *kids = [v.subviews copy];
+    for (UIView *k in kids) n += LCStripLoading(k, depth + 1);
+    if (isAdLoading && v.superview) {
+        [v removeFromSuperview];
+        n++;
+    }
+    return n;
+}
+
+NSInteger LCAdCleanupStuck(void) {
+    NSInteger n = 0;
+    // 广告真的在播时不要动，否则会把正在展示的素材摘了
+    if (gAdPlaying || gAdOpening) {
+        LCAutoLog(@"[ad] 广告正在播，跳过清理");
+        return 0;
+    }
+
+    for (UIWindow *w in LCAllWindows()) {
+        NSInteger k = LCStripLoading(w.rootViewController.view, 0);
+        if (k > 0) {
+            LCAutoLog(@"[ad] 摘掉 %ld 个残留 loading 视图 <%@>",
+                      (long)k, NSStringFromClass([w class]));
+            n += k;
+        }
+    }
+
+    // 再 dismiss 掉残留在任意 window 上的 presented VC。
+    // 只处理非系统 VC，避免把分享面板之类的东西错杀。
+    for (UIWindow *w in LCAllWindows()) {
+        UIViewController *root = w.rootViewController;
+        if (!root.presentedViewController) continue;
+        NSString *cn = NSStringFromClass([root.presentedViewController class]);
+        if ([cn hasPrefix:@"UI"] || [cn hasPrefix:@"_UI"] ||
+            [cn containsString:@"Activity"] || [cn containsString:@"Alert"]) continue;
+        LCAutoLog(@"[ad] dismiss 残留 VC <%@>", cn);
+        [root dismissViewControllerAnimated:NO completion:nil];
+        n++;
+    }
+
+    LCAutoLog(@"[ad] 清理完成，共处理 %ld 个视图", (long)n);
+    return n;
+}
+
+#pragma mark - 领时长（攒时长 听歌不中断）
+
+// 任务 600590 luna_rewards_ads，action=redirect，schema 是
+//   sslocal://luckydog/activity_task?luckydog_task_type=luna_watch_ads_settle_vip
+// 也就是「看一条激励视频换 1 天 VIP 时长」。广告本身走 lucky 那套，
+// 已经 hook 了 DidLoadSuccess / becomeEffective / close，播完能自动关。
+// 这里只需要把「点领时长 → 点活动页的广告按钮」这两步接上。
+static NSInteger gDurRemain  = 0;
+static NSInteger gDurDone    = 0;
+static NSTimeInterval gDurTapAt = 0;
+static NSTimer *gDurTimer = nil;
+
+static NSArray *LCDurationEntryTexts(void) {
+    return @[@"领时长", @"去领取时长", @"领取时长"];
+}
+
+static NSArray *LCDurationAdTexts(void) {
+    return @[@"看广告领时长", @"看视频领时长", @"立即观看", @"立即领取",
+             @"看广告", @"观看广告", @"开始观看", @"去观看", @"免费领取"];
+}
+
+static void LCDurationTick(void) {
+    if (gDurRemain <= 0) {
+        [gDurTimer invalidate];
+        gDurTimer = nil;
+        LCAutoLog(@"[dur] 完成，共领 %ld 次", (long)gDurDone);
+        return;
+    }
+    // 广告正在走，交给广告模块
+    if (gAdPlaying || gAdOpening) return;
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (gDurTapAt > 0 && now - gDurTapAt < 6) return;   // 点击限流
+
+    // ① 活动页里的广告按钮
+    UIView *btn = LCFindByTextAnywhere(LCDurationAdTexts());
+    if (btn) {
+        gDurTapAt = now;
+        BOOL ok = LCTapLynxView(btn);
+        LCAutoLog(@"[dur] 活动页点「%@」<%@> %@",
+                  LCTextOfView(btn), NSStringFromClass([btn class]),
+                  ok ? @"已发送" : @"点不动");
+        if (ok) {
+            gDurRemain--;
+            gDurDone++;
+        }
+        return;
+    }
+
+    // ② 金币任务页的入口
+    btn = LCFindByTextAnywhere(LCDurationEntryTexts());
+    if (btn) {
+        gDurTapAt = now;
+        BOOL ok = LCTapLynxView(btn);
+        LCAutoLog(@"[dur] 点入口「%@」<%@> %@",
+                  LCTextOfView(btn), NSStringFromClass([btn class]),
+                  ok ? @"已发送" : @"点不动");
+        return;
+    }
+
+    // ③ 都没有 —— 记一次，等下一 tick
+    static NSTimeInterval lastWarn = 0;
+    if (now - lastWarn > 20) {
+        lastWarn = now;
+        LCAutoLog(@"[dur] 没找到「领时长」也没找到广告按钮，抓一次界面树");
+        LCDumpAdViewTree();
+    }
+}
+
+void LCAutoDuration(NSInteger times) {
+    if (times <= 0) times = 1;
+    if (times > 10) times = 10;
+    gDurRemain = times;
+    gDurDone = 0;
+    gDurTapAt = 0;
+    LCAutoLog(@"[dur] 开始领时长 ×%ld", (long)times);
+    if (gDurTimer) [gDurTimer invalidate];
+    gDurTimer = [NSTimer scheduledTimerWithTimeInterval:1.5
+                                                repeats:YES
+                                                  block:^(NSTimer *t) { LCDurationTick(); }];
+    LCDurationTick();
+}
+
 void LCAdStop(void) {
     if (!gAdBusy && !gAdTimer) return;
     gAdBusy = NO;

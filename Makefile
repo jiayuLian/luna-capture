@@ -2,7 +2,7 @@ TARGET = iphone:clang:16.5:15.0
 ARCHS = arm64
 DEBUG = 0
 FINALPACKAGE = 1
-PACKAGE_VERSION = 3.5.4
+PACKAGE_VERSION = 3.6.0
 
 include $(THEOS)/makefiles/common.mk
 

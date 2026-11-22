@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v3.5.4"
+#define LC_VER @"v3.6.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -75,6 +75,12 @@ NSString *LCAdTemplateText(void);
 void LCAdRun(NSInteger times);         // 全自动循环:开→播16s→自动关→下一轮
 BOOL LCAdBusy(void);
 void LCAdStop(void);  // 立刻停掉循环,当前这一轮广告不强制关
+// 领时长(任务 600590 luna_rewards_ads):看一条激励视频换 1 天 VIP 时长。
+// 内部状态机: 金币任务页点「领时长」→ 活动页点广告按钮 → lucky hook 接管广告。
+void LCAutoDuration(NSInteger times);
+// 卡死自救:广告 VC 被 present 到错误 window 时,App 主 window 会永久停在
+// 全屏 BDARVLoadingView 上。摘掉遮罩 + dismiss 残留,返回处理掉的视图数。
+NSInteger LCAdCleanupStuck(void);
 NSDictionary *LCAdEffectiveExtra(void);
 // 任务页响应进来时调一次,从中解出最新的 music_incentive_ad token。
 // 任务页每次刷新都会重新生成 token(Capture.m 在记录 /luna/treasure/task/page/v2 时调)。

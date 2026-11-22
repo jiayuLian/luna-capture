@@ -8,6 +8,14 @@
 
 @implementation LCFloatWindow
 
+// ★ 这是广告卡死的根因，必须返回 NO。
+// 我们只是浮在 2050 层显示一个按钮，不需要键盘。但默认 UIWindow 会把自己
+// 变成 keyWindow，而懒猫广告 SDK 用 keyWindow 去 present 广告 VC ——
+// 结果广告被 present 进了我们的 window：广告关掉后 App 主 window 上那个
+// 全屏 BDARVLoadingView 没人移除，界面就彻底点不动，只能杀进程。
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeFocused  { return NO; }
+
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
     // 菜单展开时接管全屏(用于点遮罩关闭),其余时候只有按钮自己响应
     if (self.menuOpen) return YES;
@@ -29,6 +37,8 @@
 - (void)lcExport:(BOOL)har;
 - (void)runAutoClaim;
 - (void)runAutoAd;
+- (void)runAutoDuration;
+- (void)cleanStuckAd;
 - (void)stopAutoAd;
 - (void)exportLog;
 - (void)showAutoTail;
@@ -126,7 +136,8 @@ static UIViewController *LCAppVC(void) {
     CGFloat pw = 250;
     CGFloat rowH = 46;
     NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"导出日志", @"导出界面树",
-                        @"自动领奖", @"广告全自动 ×10", @"停止广告",
+                        @"自动领奖", @"广告全自动 ×20", @"领时长 ×3",
+                        @"清理卡住的广告", @"停止广告",
                         @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
@@ -158,9 +169,10 @@ static UIViewController *LCAppVC(void) {
         UIColor *c = [UIColor darkTextColor];
         if (i == 2) c = [UIColor systemGreenColor];     // 导出日志
         if (i == 3) c = [UIColor systemTealColor];      // 导出界面树
-        if (i == 4 || i == 5) c = [UIColor systemBlueColor];   // 自动领奖 / 广告
-        if (i == 6) c = [UIColor systemOrangeColor];    // 停止
-        if (i == 7) c = [UIColor systemRedColor];       // 清空记录
+        if (i == 4 || i == 5 || i == 6) c = [UIColor systemBlueColor];   // 领奖 / 广告 / 时长
+        if (i == 7) c = [UIColor systemPurpleColor];    // 清理卡住的广告
+        if (i == 8) c = [UIColor systemOrangeColor];    // 停止
+        if (i == 9) c = [UIColor systemRedColor];       // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -196,8 +208,13 @@ static UIViewController *LCAppVC(void) {
             break;
         case 4: [self runAutoClaim]; break;
         case 5: [self runAutoAd]; break;
-        case 6: [self stopAutoAd]; break;
+        case 6: [self runAutoDuration]; break;
         case 7:
+            [self hideMenu];
+            [self cleanStuckAd];
+            break;
+        case 8: [self stopAutoAd]; break;
+        case 9:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;
@@ -277,16 +294,48 @@ static UIViewController *LCAppVC(void) {
         return;
     }
 
-    LCAdRun(10);
-    [self toast:@"全自动:开广告→播16秒→自动关\n每轮约21秒,共10轮"];
+    // 服务端 stats.total_times = 20，一天最多 20 次
+    LCAdRun(20);
+    [self toast:@"全自动:开广告→播够服务端要求→点领取成功\n每轮约35秒,共20轮"];
 
     __weak typeof(self) ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(130 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(230 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
+    for (NSInteger i = 1; i <= 6; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(i * 120 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
+    }
+}
+
+// 领时长：任务 600590「攒时长 听歌不中断」，action=redirect，
+// schema 是 sslocal://luckydog/activity_task?luckydog_task_type=luna_watch_ads_settle_vip
+// 也就是看一条激励视频换 1 天 VIP 时长。点进 Lynx 活动页后由 lucky hook 接管。
+- (void)runAutoDuration {
+    [self hideMenu];
+    if (LCAdBusy()) {
+        [self toast:@"广告还在跑，先停掉"];
+        return;
+    }
+    LCAutoDuration(3);
+    [self toast:@"领时长:点「领时长」→活动页点广告按钮\n每次 +1 天，共 3 次"];
+
+    __weak typeof(self) ws = self;
+    for (NSInteger i = 1; i <= 4; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(i * 75 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
+    }
+}
+
+// 卡死自救：广告 VC 被 present 到错误 window 时，App 主 window 会永久停在
+// 全屏 BDARVLoadingView 上，点什么都没反应。这里把遮罩摘掉、dismiss 掉
+// 所有我们 window 上残留的 presented VC。
+- (void)cleanStuckAd {
+    NSInteger n = LCAdCleanupStuck();
+    if (n > 0) {
+        [self toast:[NSString stringWithFormat:@"清掉 %ld 个残留视图", (long)n]];
+    } else {
+        [self toast:@"没发现残留视图"];
+    }
 }
 
 - (void)stopAutoAd {
