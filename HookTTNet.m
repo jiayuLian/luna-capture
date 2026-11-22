@@ -26,9 +26,13 @@ BOOL LCTryClaimURL(NSString *url, NSString *method);
 static volatile int gSeen = 0;
 static volatile int gSkipped = 0;
 
+int LCSessionSeen(void);
+int LCSessionHooked(void);
+
 NSString *LCStatString(void) {
-    return [NSString stringWithFormat:@"%@ seen:%d skip:%d",
-            LCHookInfo ?: @"ttnet:none", gSeen, gSkipped];
+    return [NSString stringWithFormat:@"%@ seen:%d skip:%d | session:hook=%d rec=%d",
+            LCHookInfo ?: @"ttnet:none", gSeen, gSkipped,
+            LCSessionHooked(), LCSessionSeen()];
 }
 
 #pragma mark - 安全取值
