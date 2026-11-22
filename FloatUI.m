@@ -1,70 +1,45 @@
 #import "LunaCapture.h"
 
-#pragma mark - 只让按钮吃触摸的 window(不挡 App 其他区域)
+#pragma mark - 只让按钮吃触摸的 window
 
 @interface LCFloatWindow : UIWindow
+@property (nonatomic, assign) BOOL menuOpen;
 @end
 
 @implementation LCFloatWindow
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    for (UIView *v in self.subviews) {
-        if (!v.hidden && CGRectContainsPoint(v.frame, point)) return YES;
-    }
-    return NO;
+    // 菜单展开时接管全屏(用于点遮罩关闭),其余时候只有按钮自己响应
+    if (self.menuOpen) return YES;
+    UIView *root = self.rootViewController.view;
+    if (!root) return NO;
+    CGPoint p = [root convertPoint:point fromView:self];
+    UIView *hit = [root hitTest:p withEvent:event];
+    return (hit != nil && hit != root);
 }
 
 @end
 
-#pragma mark - 悬浮控制器
+#pragma mark - 浮层控制器
 
 @interface LCFloatVC : UIViewController
 @property (nonatomic, strong) UIButton *btn;
+@property (nonatomic, strong) UIView *menuMask;
+@property (nonatomic, assign) CGRect buttonRect;
 @end
 
 static LCFloatWindow *gWindow = nil;
 
-static UIViewController *LCTopVC(void) {
-    UIWindow *key = nil;
-    NSArray *wins = [UIApplication sharedApplication].windows;
-    for (NSInteger i = (NSInteger)wins.count - 1; i >= 0; i--) {
-        UIWindow *w = wins[(NSUInteger)i];
-        if (w.isKeyWindow && w != gWindow) { key = w; break; }
+// 取 App 自己的 view controller 用来弹系统分享,绝不能返回我们自己的 window
+static UIViewController *LCAppVC(void) {
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w == gWindow) continue;
+        if (w.isHidden || !w.rootViewController) continue;
+        UIViewController *vc = w.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        return vc;
     }
-    if (!key) key = gWindow;
-    UIViewController *vc = key.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    return vc;
-}
-
-static void LCPresentShare(NSString *path, UIView *anchor) {
-    if (path.length == 0) return;
-    NSURL *u = [NSURL fileURLWithPath:path];
-    UIActivityViewController *avc =
-        [[UIActivityViewController alloc] initWithActivityItems:@[u]
-                                         applicationActivities:nil];
-    UIViewController *top = LCTopVC();
-    if (avc.popoverPresentationController) {
-        avc.popoverPresentationController.sourceView = anchor;
-        avc.popoverPresentationController.sourceRect = anchor.bounds;
-    }
-    [top presentViewController:avc animated:YES completion:nil];
-}
-
-static void LCToast(NSString *msg) {
-    UIAlertController *a =
-        [UIAlertController alertControllerWithTitle:nil
-                                            message:msg
-                                     preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"好"
-                                          style:UIAlertActionStyleDefault
-                                        handler:nil]];
-    UIViewController *top = LCTopVC();
-    if (top.presentedViewController) {
-        [top.presentedViewController presentViewController:a animated:YES completion:nil];
-    } else {
-        [top presentViewController:a animated:YES completion:nil];
-    }
+    return nil;
 }
 
 @implementation LCFloatVC
@@ -73,23 +48,19 @@ static void LCToast(NSString *msg) {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor clearColor];
 
-    CGFloat size = 54;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = CGRectMake(0, 0, size, size);
-    btn.backgroundColor = [UIColor colorWithRed:0.98 green:0.19 blue:0.35 alpha:0.92];
-    btn.layer.cornerRadius = size / 2.0;
+    btn.frame = self.buttonRect;
+    btn.backgroundColor = [UIColor colorWithRed:0.98 green:0.19 blue:0.35 alpha:0.94];
+    btn.layer.cornerRadius = CGRectGetWidth(self.buttonRect) / 2.0;
     btn.layer.shadowColor = [UIColor blackColor].CGColor;
     btn.layer.shadowOpacity = 0.35;
     btn.layer.shadowRadius = 4;
     btn.layer.shadowOffset = CGSizeMake(0, 2);
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
     [btn setTitle:@"0" forState:UIControlStateNormal];
     [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 
-    [btn addTarget:self
-            action:@selector(onTap)
-  forControlEvents:UIControlEventTouchUpInside];
-
+    [btn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
     UIPanGestureRecognizer *pan =
         [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
     [btn addGestureRecognizer:pan];
@@ -101,6 +72,7 @@ static void LCToast(NSString *msg) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *n) {
+        if (!self.btn) return;
         NSString *t = [NSString stringWithFormat:@"%@", n.object];
         [self.btn setTitle:t forState:UIControlStateNormal];
     }];
@@ -115,54 +87,143 @@ static void LCToast(NSString *msg) {
 }
 
 - (void)onPan:(UIPanGestureRecognizer *)g {
-    CGPoint t = [g translationInView:nil];
-    CGPoint c = self.view.window.center;
-    self.view.window.center = CGPointMake(c.x + t.x, c.y + t.y);
-    [g setTranslation:CGPointZero inView:nil];
+    CGPoint t = [g translationInView:self.view];
+    CGRect f = self.btn.frame;
+    f.origin.x += t.x;
+    f.origin.y += t.y;
+    // 夹在屏幕内,别拖丢
+    CGRect bounds = self.view.bounds;
+    f.origin.x = MAX(0, MIN(f.origin.x, CGRectGetWidth(bounds) - CGRectGetWidth(f)));
+    f.origin.y = MAX(0, MIN(f.origin.y, CGRectGetHeight(bounds) - CGRectGetHeight(f) - 34));
+    self.btn.frame = f;
+    [g setTranslation:CGPointZero inView:self.view];
 }
 
+#pragma mark 菜单(自绘,不依赖 present,避免容器尺寸问题)
+
 - (void)onTap {
-    UIAlertController *ac =
-        [UIAlertController alertControllerWithTitle:@"LunaCapture"
-                                            message:[NSString stringWithFormat:
-                                                     @"已记录 %lu 条 · %@",
-                                                     (unsigned long)[[LCCapture shared] count],
-                                                     LC_VER]
-                                     preferredStyle:UIAlertControllerStyleActionSheet];
-
-    [ac addAction:[UIAlertAction actionWithTitle:@"导出 HAR"
-                                           style:UIAlertActionStyleDefault
-                                         handler:^(UIAlertAction *a) {
-        NSString *p = [[LCCapture shared] exportHAR];
-        if (p.length == 0) { LCToast(@"导出失败,看 Xcode / 控制台日志"); return; }
-        LCPresentShare(p, self.btn);
-    }]];
-
-    [ac addAction:[UIAlertAction actionWithTitle:@"导出 JSON"
-                                           style:UIAlertActionStyleDefault
-                                         handler:^(UIAlertAction *a) {
-        NSString *p = [[LCCapture shared] exportJSON];
-        if (p.length == 0) { LCToast(@"导出失败,看 Xcode / 控制台日志"); return; }
-        LCPresentShare(p, self.btn);
-    }]];
-
-    [ac addAction:[UIAlertAction actionWithTitle:@"清空"
-                                           style:UIAlertActionStyleDestructive
-                                         handler:^(UIAlertAction *a) {
-        [[LCCapture shared] clear];
-    }]];
-
-    [ac addAction:[UIAlertAction actionWithTitle:@"收起按钮"
-                                           style:UIAlertActionStyleCancel
-                                         handler:^(UIAlertAction *a) {
-        gWindow.hidden = YES;
-    }]];
-
-    if (ac.popoverPresentationController) {
-        ac.popoverPresentationController.sourceView = self.btn;
-        ac.popoverPresentationController.sourceRect = self.btn.bounds;
+    if (self.menuMask) {
+        [self hideMenu];
+        return;
     }
-    [LCTopVC() presentViewController:ac animated:YES completion:nil];
+    [self showMenu];
+}
+
+- (void)showMenu {
+    CGRect b = self.view.bounds;
+
+    UIView *mask = [[UIView alloc] initWithFrame:b];
+    mask.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+    [mask addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                     action:@selector(hideMenu)]];
+
+    CGFloat pw = 250;
+    CGFloat rowH = 46;
+    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"清空记录", @"关闭菜单"];
+    CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
+
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - pw) / 2.0,
+                                                             (b.size.height - ph) / 2.0,
+                                                             pw, ph)];
+    panel.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.98];
+    panel.layer.cornerRadius = 16;
+    panel.layer.shadowColor = [UIColor blackColor].CGColor;
+    panel.layer.shadowOpacity = 0.25;
+    panel.layer.shadowRadius = 16;
+    panel.layer.shadowOffset = CGSizeMake(0, 6);
+    [mask addSubview:panel];
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 14, pw - 32, 40)];
+    title.numberOfLines = 2;
+    title.font = [UIFont boldSystemFontOfSize:13];
+    title.textColor = [UIColor darkGrayColor];
+    title.text = [NSString stringWithFormat:@"LunaCapture %@\n已记录 %lu 条",
+                  LC_VER, (unsigned long)[[LCCapture shared] count]];
+    [panel addSubview:title];
+
+    for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+        row.frame = CGRectMake(0, 54 + rowH * i, pw, rowH);
+        row.tag = i;
+        row.titleLabel.font = [UIFont systemFontOfSize:16];
+        [row setTitle:titles[(NSUInteger)i] forState:UIControlStateNormal];
+        UIColor *c = (i == 2) ? [UIColor systemRedColor] : [UIColor darkTextColor];
+        [row setTitleColor:c forState:UIControlStateNormal];
+        [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
+
+        if (i > 0) {
+            UIView *line = [[UIView alloc] initWithFrame:CGRectMake(16, 0, pw - 32, 0.5)];
+            line.backgroundColor = [UIColor colorWithWhite:0 alpha:0.12];
+            [row addSubview:line];
+        }
+        [panel addSubview:row];
+    }
+
+    [self.view addSubview:mask];
+    self.menuMask = mask;
+    gWindow.menuOpen = YES;
+}
+
+- (void)hideMenu {
+    [self.menuMask removeFromSuperview];
+    self.menuMask = nil;
+    gWindow.menuOpen = NO;
+    [self refresh];
+}
+
+- (void)onMenuRow:(UIButton *)sender {
+    switch (sender.tag) {
+        case 0: [self export:YES]; break;
+        case 1: [self export:NO];  break;
+        case 2:
+            [[LCCapture shared] clear];
+            [self hideMenu];
+            break;
+        default:
+            [self hideMenu];
+            break;
+    }
+}
+
+- (void)export:(BOOL)har {
+    NSString *p = har ? [[LCCapture shared] exportHAR]
+                      : [[LCCapture shared] exportJSON];
+    if (p.length == 0) {
+        [self toast:@"导出失败,看控制台日志"];
+        return;
+    }
+
+    [self hideMenu];
+
+    UIActivityViewController *avc =
+        [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:p]]
+                                         applicationActivities:nil];
+    if (avc.popoverPresentationController) {
+        avc.popoverPresentationController.sourceView = self.btn;
+        avc.popoverPresentationController.sourceRect = self.btn.bounds;
+    }
+    // 一定要弹在 App 自己的 VC 上,弹在这个全屏浮窗里会出容器尺寸问题
+    UIViewController *host = LCAppVC() ?: self;
+    [host presentViewController:avc animated:YES completion:nil];
+}
+
+- (void)toast:(NSString *)msg {
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];
+    l.text = msg;
+    l.font = [UIFont systemFontOfSize:14];
+    l.textColor = [UIColor whiteColor];
+    l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.82];
+    l.textAlignment = NSTextAlignmentCenter;
+    l.numberOfLines = 2;
+    l.layer.cornerRadius = 10;
+    l.clipsToBounds = YES;
+    CGSize s = [l sizeThatFits:CGSizeMake(260, 200)];
+    l.frame = CGRectMake((self.view.bounds.size.width - s.width - 32) / 2.0,
+                         self.view.bounds.size.height - 140,
+                         s.width + 32, s.height + 20);
+    [self.view addSubview:l];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [l removeFromSuperview]; });
 }
 
 @end
@@ -190,16 +251,20 @@ static BOOL LCSetupUI_inner(void) {
                 break;
             }
         }
-        // 场景还没就绪,用 initWithFrame 建的 window 在 iOS 13+ 不会显示,必须等
-        if (!w) return NO;
+        if (!w) return NO;   // 场景没就绪,下一轮再试
     } else {
         w = [[LCFloatWindow alloc] initWithFrame:screen];
     }
 
-    w.frame = CGRectMake(x, y, size, size);
+    // window 必须全屏:设成 54x54 会让 present 出来的系统控件被压进这个小容器
+    w.frame = screen;
     w.windowLevel = UIWindowLevelAlert + 50;
     w.backgroundColor = [UIColor clearColor];
-    w.rootViewController = [LCFloatVC new];
+    w.menuOpen = NO;
+
+    LCFloatVC *vc = [LCFloatVC new];
+    vc.buttonRect = CGRectMake(x, y, size, size);
+    w.rootViewController = vc;
     w.hidden = NO;
 
     gWindow = w;
