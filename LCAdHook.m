@@ -403,14 +403,18 @@ static UIView *LCCardAncestorOf(UIView *v) {
     return v.superview ?: v;
 }
 
-// 在卡片里找按钮：85x36 上下、贴右侧（x 最大）
+// 在卡片里找按钮：85x36 上下、贴右侧（x 最大）。
+// 用数组迭代而不是递归 block —— 递归 block 会触发 -Warc-retain-cycles，
+// 而 workflow 带 -Werror，直接编译失败（v3.9.0 第一次构建就挂在这）。
 static UIView *LCButtonInCard(UIView *card) {
     if (!card) return nil;
-    __block UIView *best = nil;
-    __block CGFloat bestX = -1;
-    __block void (^walk)(UIView *, int);
-    walk = ^(UIView *v, int d) {
-        if (!v || d > 8) return;
+    UIView *best = nil;
+    CGFloat bestX = -1;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:card];
+    int guard = 0;
+    while (stack.count && guard++ < 4000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
         CGRect f = v.bounds;
         BOOL sizeOK = (f.size.width >= 60 && f.size.width <= 120 &&
                        f.size.height >= 24 && f.size.height <= 52);
@@ -423,9 +427,8 @@ static UIView *LCButtonInCard(UIView *card) {
                 best = v;
             }
         }
-        for (UIView *s in v.subviews) walk(s, d + 1);
-    };
-    walk(card, 0);
+        for (UIView *s in v.subviews) [stack addObject:s];
+    }
     return best;
 }
 
