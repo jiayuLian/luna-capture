@@ -8,10 +8,7 @@ static void LCInit(void) {
         NSLog(@"[LC] dylib loaded · %@", LC_VER);
         // hook 尽早装,才能抓到启动阶段的请求
         LCHookAll();
-        // UI 等 UIKit 就绪
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            LCSetupUI();
-        });
+        // LCSetupUI 内部自带延迟与场景重试,这里不重复等
+        LCSetupUI();
     }
 }
