@@ -173,6 +173,15 @@ static NSString *lc_body_str(const uint8_t *b, size_t n) {
 
 static NSString *lc_resp_body(NSDictionary *hdr, const uint8_t *b, size_t n) {
     if (!b || n == 0) return nil;
+
+    // 直接按魔数判断,不依赖 header。
+    // header 值有可能被上游截断(之前 content-encoding 被读成 "gzi"),
+    // 靠 header 判断会让所有 gzip 响应都退化成 base64。
+    if (n > 2 && b[0] == 0x1F && b[1] == 0x8B) {
+        NSString *s = lc_gzip([NSData dataWithBytes:b length:n]);
+        if (s) return s;
+    }
+
     NSString *enc = nil;
     for (NSString *k in hdr) {
         if ([k.lowercaseString isEqualToString:@"content-encoding"]) { enc = hdr[k]; break; }
