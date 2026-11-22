@@ -11,6 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ldid
+        run: |
+          brew install ldid
+          ldid -v || true
+
       - name: Install Theos + iOS SDK
         run: |
           export THEOS=$HOME/theos
@@ -44,8 +49,10 @@ jobs:
           fi
           echo "--- version marker ---"
           strings dist/luna_capture.dylib | grep -F "v1.4.1" || { echo "FAIL: no version marker"; exit 1; }
-          echo "--- ttnet channel ---"
-          strings dist/luna_capture.dylib | grep -F "NetworkManagerChromium" || { echo "FAIL: no ttnet hook"; exit 1; }
+          echo "--- channels ---"
+          strings dist/luna_capture.dylib | grep -F "TTHttpTask" >/dev/null || { echo "FAIL: no ttnet class"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "didReceiveData" >/dev/null || { echo "FAIL: no session delegate"; exit 1; }
+          echo "channels ok"
           echo "--- size ---"
           ls -l dist/luna_capture.dylib
 
