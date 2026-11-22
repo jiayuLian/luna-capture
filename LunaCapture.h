@@ -14,6 +14,7 @@
 @property (nonatomic, strong) NSDictionary *reqHeaders;
 @property (nonatomic, strong) NSDictionary *respHeaders;
 @property (nonatomic, assign) NSInteger status;
+@property (nonatomic, assign) NSInteger seq;      // 全局递增序号,按操作顺序排查用
 @property (nonatomic, strong) NSDate *start;
 @property (nonatomic, strong) NSDate *end;
 @property (nonatomic, copy) NSString *source;   // nsurlsession / boringssl
