@@ -108,11 +108,24 @@ static void LCRetryTTNet(int tries) {
     LCHookTTNet();
     LCHookSession();      // delegate 类可能后加载,一并重试
     LCHookSSL();          // boringssl.framework 加载后才能定位符号
-    LCAdHookInstall();    // 激励视频的 bridge 类由 Lynx 页面加载后才有
     if (tries < 20) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             LCRetryTTNet(tries + 1);
+        });
+    }
+}
+
+// 广告 hook 单独一条重试链。它是 method swizzle,不动代码页,
+// 和 safe 模式毫无关系 —— 之前只在 LCRetryTTNet 里调,safe 模式下
+// 7 个 hook 一个都没装,「看广告全自动」直接失效(实测踩到)。
+// bridge 类要等 Lynx 页面加载后才存在,所以重试窗口给到 25 秒。
+static void LCRetryAdHooks(int tries) {
+    LCAdHookInstall();
+    if (tries < 50) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            LCRetryAdHooks(tries + 1);
         });
     }
 }
@@ -137,6 +150,9 @@ static void LCStartupSchedulers(void) {
         // 安全模式下关掉 inline hook 兜底,只保留最稳的那条路。
         LCSetSSLMode(full);
         LCHookSSL();
+
+        // 广告 hook 与模式无关，两种模式都装
+        LCRetryAdHooks(0);
 
         if (full) {
             // 辅通道:NSURLSessionTask resume / TTNet 零参方法

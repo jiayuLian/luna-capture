@@ -170,13 +170,11 @@ static BOOL LCInternalHas(NSString *k) {
     // 广告自动化每轮都要换新 token —— 复用旧 token 服务端会回 1300003 服务异常。
     // base64 的响应(二进制)跳过,任务页永远是明文 JSON。
     if ([rec.url rangeOfString:@"/luna/treasure/task/page/v2"].location != NSNotFound) {
-        // 这行是诊断用的：能看到任务页到底有没有被 Capture 收到、
-        // 拿到的 body 是不是明文 JSON。没有它就只能瞎猜。
-        LCAutoLog(@"[ad] 见到任务页 %luB %@", (unsigned long)rec.respBody.length,
-                  rec.respIsBase64 ? @"(base64/二进制,跳过)" : @"(明文)");
-        if (!rec.respIsBase64 && rec.respBody.length > 200) {
-            LCAdNotePageResponse(rec.respBody);
-        }
+        // 这里绝不能打日志：addRecord 跑在 SSL 读回调线程,HTTP/2 一条响应
+        // 会被拆成 headers + body 多次进来,一秒能触发十几次。
+        // v3.3.0 在这里加 LCAutoLog 直接导致 full 模式崩溃降级 safe。
+        // 改成计数器,导出日志时汇总一行。
+        LCAdNoteTaskPage(rec.respBody, rec.respIsBase64);
     }
     // preload 响应里的 effective_inspire_time 决定这次广告要播多久。
     // 15/20/30 都出现过，写死 16 秒会提前关掉，服务端按 preload 到 done 的

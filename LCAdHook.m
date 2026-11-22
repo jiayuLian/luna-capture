@@ -47,6 +47,10 @@ static __unsafe_unretained id gAdBridgeInst = nil;
 static NSDictionary *gAdEffectiveExtra = nil;
 static NSLock *gAdLock = nil;
 static BOOL gAdHooked = NO;
+static volatile int gTaskPageSeen = 0;
+static volatile int gTaskPageParsed = 0;
+int LCAdTaskPageSeen(void)   { return gTaskPageSeen; }
+int LCAdTaskPageParsed(void) { return gTaskPageParsed; }
 
 static volatile BOOL gAdBusy = NO;
 static volatile BOOL gAdOpening = NO;          // 已调 bridge，等 DidLoadSuccess
@@ -468,6 +472,22 @@ void LCAdHookInstall(void) {
 // Capture.m 在收到 /luna/treasure/task/page/v2 响应时调这里。
 // 任务页每次刷新都会重新生成 token(抓包里连续 4 次刷新 4 个不同 token)，
 // 所以每轮结束后 App 自己刷任务页时就能白拿一个新 token。
+// addRecord 侧的入口：只计数，不打日志
+void LCAdNoteTaskPage(NSString *body, BOOL isBase64) {
+    gTaskPageSeen++;
+    if (isBase64 || body.length < 200) return;
+    gTaskPageParsed++;
+    LCAdNotePageResponse(body);
+}
+
+// 导出日志时打一行，代替原来每条都打
+void LCAdTaskPageStats(void) {
+    LCAutoLog(@"[ad] 任务页命中 %d 次，其中可解析 %d 次，最新 token %@",
+              LCAdTaskPageSeen(), LCAdTaskPageParsed(),
+              gAdFreshToken ? [NSString stringWithFormat:@"%luB",
+                               (unsigned long)gAdFreshToken.length] : @"无");
+}
+
 void LCAdNotePageResponse(NSString *body) {
     if (body.length < 100) return;
     NSData *d = [body dataUsingEncoding:NSUTF8StringEncoding];

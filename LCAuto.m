@@ -16,6 +16,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <zlib.h>
+#include <time.h>
 
 // 活动级 token。两份 HAR(相隔 1 小时)里都是同一个值,
 // 说明它是活动配置常量而不是一次性票据。
@@ -32,6 +33,21 @@ static NSLock *gAutoLock = nil;
 
 #pragma mark - 日志
 
+// 落盘走串行队列。addRecord 跑在 SSL 读回调线程,如果在那种线程上
+// writeToFile 会卡住整个 TLS 读循环;异步落盘丢掉的一点实时性无所谓。
+static dispatch_queue_t gAutoQueue = NULL;
+
+static NSString *LCTimeStamp(void) {
+    // 不用 NSDateFormatter:它非线程安全,在 SSL 回调线程并发调用会崩
+    // (v3.3.0 就是死在这里)。strftime 是纯函数,随便哪个线程都安全。
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    char buf[16];
+    strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+    return [NSString stringWithUTF8String:buf];
+}
+
 void LCAutoLog(NSString *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -42,22 +58,25 @@ void LCAutoLog(NSString *fmt, ...) {
     if (!gAutoLock) gAutoLock = [NSLock new];
     [gAutoLock lock];
     if (!gAutoLogBuf) gAutoLogBuf = [NSMutableArray array];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@",
-                      [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                                     dateStyle:NSDateFormatterNoStyle
-                                                     timeStyle:NSDateFormatterMediumStyle],
-                      s];
+    NSString *line = [NSString stringWithFormat:@"[%@] %@", LCTimeStamp(), s];
     [gAutoLogBuf addObject:line];
     if (gAutoLogBuf.count > 400) [gAutoLogBuf removeObjectsInRange:NSMakeRange(0, 100)];
     NSString *snapshot = [gAutoLogBuf componentsJoinedByString:@"\n"];
     [gAutoLock unlock];
 
-    // 落盘到 Documents/lc_auto.txt,文件 App 里可直接取
+    if (!gAutoQueue) {
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            gAutoQueue = dispatch_queue_create("lc.auto.log", DISPATCH_QUEUE_SERIAL);
+        });
+    }
     NSArray *ps = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                       NSUserDomainMask, YES);
     if (ps.count == 0) return;
     NSString *p = [ps.firstObject stringByAppendingPathComponent:@"lc_auto.txt"];
-    [snapshot writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    dispatch_async(gAutoQueue, ^{
+        [snapshot writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    });
 }
 
 NSString *LCAutoLogText(void) {
@@ -475,6 +494,10 @@ NSString *LCAutoExportLog(void) {
                                                       NSUserDomainMask, YES);
     if (ps.count == 0) return nil;
     NSString *dir = ps.firstObject;
+
+    // 任务页命中次数 / token 刷新情况，每次导出都留一行，
+    // 不用再在 SSL 回调线程里打日志
+    LCAdTaskPageStats();
 
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"LunaCapture %@\n", LC_VER];
