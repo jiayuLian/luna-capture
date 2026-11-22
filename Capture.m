@@ -165,6 +165,14 @@ static BOOL LCInternalHas(NSString *k) {
 
 - (void)addRecord:(LCRecord *)rec {
     if (!rec || rec.url.length == 0) return;
+
+    // 任务页响应里带着最新的 music_incentive_ad token(280 字符,一次一个)。
+    // 广告自动化每轮都要换新 token —— 复用旧 token 服务端会回 1300003 服务异常。
+    // base64 的响应(二进制)跳过,任务页永远是明文 JSON。
+    if (!rec.respIsBase64 && rec.respBody.length > 200 &&
+        [rec.url rangeOfString:@"/luna/treasure/task/page/v2"].location != NSNotFound) {
+        LCAdNotePageResponse(rec.respBody);
+    }
     NSUInteger n = 0;
     BOOL notify = NO;
     [_lock lock];

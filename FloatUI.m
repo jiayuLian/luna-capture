@@ -29,6 +29,7 @@
 - (void)lcExport:(BOOL)har;
 - (void)runAutoClaim;
 - (void)runAutoAd;
+- (void)stopAutoAd;
 - (void)exportLog;
 - (void)showAutoTail;
 @end
@@ -125,7 +126,7 @@ static UIViewController *LCAppVC(void) {
     CGFloat pw = 250;
     CGFloat rowH = 46;
     NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"导出日志", @"自动领奖",
-                        @"看广告 ×5", @"清空记录", @"关闭菜单"];
+                        @"广告全自动 ×10", @"停止广告", @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - pw) / 2.0,
@@ -155,8 +156,9 @@ static UIViewController *LCAppVC(void) {
         [row setTitle:titles[(NSUInteger)i] forState:UIControlStateNormal];
         UIColor *c = [UIColor darkTextColor];
         if (i == 2) c = [UIColor systemGreenColor];     // 导出日志
-        if (i == 3 || i == 4) c = [UIColor systemBlueColor];   // 自动领奖 / 看广告
-        if (i == 5) c = [UIColor systemRedColor];       // 清空记录
+        if (i == 3 || i == 4) c = [UIColor systemBlueColor];   // 自动领奖 / 广告
+        if (i == 5) c = [UIColor systemOrangeColor];    // 停止
+        if (i == 6) c = [UIColor systemRedColor];       // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -187,7 +189,8 @@ static UIViewController *LCAppVC(void) {
         case 2: [self exportLog]; break;
         case 3: [self runAutoClaim]; break;
         case 4: [self runAutoAd]; break;
-        case 5:
+        case 5: [self stopAutoAd]; break;
+        case 6:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;
@@ -267,14 +270,26 @@ static UIViewController *LCAppVC(void) {
         return;
     }
 
-    LCAdRun(5);
-    [self toast:@"开始,每次约 50 秒\n共 5 次,日志见 lc_auto.txt"];
+    LCAdRun(10);
+    [self toast:@"全自动:开广告→播16秒→自动关\n每轮约21秒,共10轮"];
 
     __weak typeof(self) ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(270 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(130 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(230 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
+}
+
+- (void)stopAutoAd {
+    [self hideMenu];
+    if (!LCAdBusy()) {
+        [self toast:@"当前没在跑"];
+        return;
+    }
+    LCAdStop();
+    [self toast:@"已停止"];
 }
 
 - (void)showAutoTail {

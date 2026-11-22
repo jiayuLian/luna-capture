@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v2.2.0"
+#define LC_VER @"v3.0.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -72,9 +72,14 @@ void LCAutoLog(NSString *fmt, ...);    // 供其它模块写同一条日志流
 void LCAdHookInstall(void);
 BOOL LCAdHasTemplate(void);            // 是否已录到 paramModel(需手动点过一次广告)
 NSString *LCAdTemplateText(void);
-void LCAdRun(NSInteger times);         // 循环触发,每次间隔 48 秒
+void LCAdRun(NSInteger times);         // 全自动循环:开→播16s→自动关→下一轮
 BOOL LCAdBusy(void);
+void LCAdStop(void);  // 立刻停掉循环,当前这一轮广告不强制关
 NSDictionary *LCAdEffectiveExtra(void);
+// 任务页响应进来时调一次,从中解出最新的 music_incentive_ad token。
+// 任务页每次刷新都会重新生成 token(Capture.m 在记录 /luna/treasure/task/page/v2 时调)。
+void LCAdNotePageResponse(NSString *body);
+NSString *LCAdCurrentToken(void);
 int  LCSslHooked(void);
 int  LCSslSeen(void);
 const char *LCSslInfo(void);

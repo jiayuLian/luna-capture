@@ -49,7 +49,7 @@ jobs:
             echo "FAIL: substrate dependency leaked"; exit 1
           fi
           echo "--- version marker ---"
-          strings dist/luna_capture.dylib | grep -F "v2.2.0" || { echo "FAIL: no version marker"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "v3.0.0" || { echo "FAIL: no version marker"; exit 1; }
           echo "--- channels ---"
           strings dist/luna_capture.dylib | grep -F "TTHttpTask" >/dev/null || { echo "FAIL: no ttnet class"; exit 1; }
           strings dist/luna_capture.dylib | grep -F "didReceiveData" >/dev/null || { echo "FAIL: no session delegate"; exit 1; }
@@ -57,6 +57,9 @@ jobs:
           strings dist/luna_capture.dylib | grep -F "BDUGLuckyDogNetworkManager" >/dev/null || { echo "FAIL: no auto channel"; exit 1; }
           strings dist/luna_capture.dylib | grep -F "lc_auto.txt" >/dev/null || { echo "FAIL: no auto log"; exit 1; }
           strings dist/luna_capture.dylib | grep -F "BDUGLuckyADRewardedVideoXBridge" >/dev/null || { echo "FAIL: no ad bridge"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "BecomeEffective" >/dev/null || { echo "FAIL: no effective hook"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "didClickCloseWithInfo" >/dev/null || { echo "FAIL: no close hook"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "music_incentive_ad" >/dev/null || { echo "FAIL: no token refresh"; exit 1; }
           echo "channels ok"
           echo "--- size ---"
           ls -l dist/luna_capture.dylib
