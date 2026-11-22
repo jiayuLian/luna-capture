@@ -336,7 +336,9 @@ static BOOL LCInternalHas(NSString *k) {
     return @{
         @"log": @{
             @"version": @"1.2",
-            @"creator": @{@"name": @"LunaCapture", @"version": LC_VER},
+            @"creator": @{@"name": @"LunaCapture",
+                          @"version": LC_VER,
+                          @"comment": LCStatString() ?: @""},
             @"entries": entries
         }
     };
