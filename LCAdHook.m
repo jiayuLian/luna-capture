@@ -1116,6 +1116,27 @@ NSInteger LCAdCleanupStuck(void) {
     return n;
 }
 
+// 领时长的广告不是通过 bridge 触发的，是用户在活动页点按钮后 SDK 自己加载。
+// 所以状态机要由外部接管：把 gAdBusy 打开、轮次归零，让 LCTick 只管
+// 「等 DidLoadSuccess → 播够 → 点领取成功 → 关闭」，关完 LCScheduleNext
+// 看到 gAdRemain<=0 会自动收尾。
+static void LCAdBeginExternal(void) {
+    if (gAdTimer) { [gAdTimer invalidate]; gAdTimer = nil; }
+    gAdBusy      = YES;
+    gAdRemain    = 0;
+    gAdOpening   = YES;
+    gAdPlaying   = NO;
+    gAdClosing   = NO;
+    gAdSawClose  = NO;
+    gAdDumped    = NO;
+    gAdCloseTryAt = 0;
+    gAdOpenAt    = [[NSDate date] timeIntervalSince1970];
+    gAdTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                repeats:YES
+                                                  block:^(NSTimer *t) { LCTick(); }];
+    LCAutoLog(@"[dur] 已接管广告状态机，等 DidLoadSuccess");
+}
+
 #pragma mark - 领时长（攒时长 听歌不中断）
 
 // 任务 600590 luna_rewards_ads，action=redirect，schema 是
@@ -1161,6 +1182,7 @@ static void LCDurationTick(void) {
         if (ok) {
             gDurRemain--;
             gDurDone++;
+            LCAdBeginExternal();
         }
         return;
     }
