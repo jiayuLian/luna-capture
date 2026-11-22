@@ -1,0 +1,53 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  dylib:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos + iOS SDK
+        run: |
+          export THEOS=$HOME/theos
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          git clone --recursive -q https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          cd "$THEOS/sdks"
+          curl -sL -o sdk.zip https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.zip
+          unzip -q sdk.zip
+          ls -d *.sdk
+
+      - name: Build
+        run: |
+          make clean || true
+          make -j4 FINALPACKAGE=1 2>&1 | tail -50
+
+      - name: Collect and verify
+        run: |
+          F=$(find . -name 'luna_capture.dylib' -not -path '*.dSYM/*' | head -1)
+          echo "found: $F"
+          test -n "$F" || { echo "no dylib produced"; exit 1; }
+          mkdir -p dist
+          cp "$F" dist/luna_capture.dylib
+          file dist/luna_capture.dylib
+          lipo -info dist/luna_capture.dylib
+          echo "--- linkage ---"
+          otool -L dist/luna_capture.dylib
+          if otool -L dist/luna_capture.dylib | grep -qi substrate; then
+            echo "FAIL: substrate dependency leaked"; exit 1
+          fi
+          echo "--- version marker ---"
+          strings dist/luna_capture.dylib | grep -F "v1.0.0" || { echo "FAIL: no version marker"; exit 1; }
+          echo "--- size ---"
+          ls -l dist/luna_capture.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna_capture
+          path: dist/luna_capture.dylib
+          if-no-files-found: error
