@@ -4,6 +4,8 @@ DEBUG = 0
 FINALPACKAGE = 1
 PACKAGE_VERSION = 1.0.0
 
+include $(THEOS)/makefiles/common.mk
+
 LIBRARY_NAME = luna_capture
 luna_capture_FILES = Entry.m Capture.m HAR.m FloatUI.m
 luna_capture_FRAMEWORKS = Foundation UIKit
