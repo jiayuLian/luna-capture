@@ -23,6 +23,13 @@
 static const void *kLCBodyKey   = &kLCBodyKey;    // 累积的响应体
 static const void *kLCTrackedKey = &kLCTrackedKey; // 已登记标记
 
+// 诊断计数:导出 HAR 时写进 creator.comment,一眼看出哪条通道在工作
+static volatile int gSessionSeen = 0;
+static volatile int gSessionHooked = 0;
+
+int LCSessionSeen(void) { return gSessionSeen; }
+int LCSessionHooked(void) { return gSessionHooked; }
+
 #pragma mark - 工具
 
 static id LCKVC(id obj, NSArray<NSString *> *keys) {
@@ -161,6 +168,7 @@ static void LCFinishSessionTask(id task) {
     r.start = [NSDate date];
     r.end = r.start;
 
+    gSessionSeen++;
     [[LCCapture shared] addRecord:r];
 }
 
@@ -247,6 +255,7 @@ static void LCHookResumeOn(Class cls) {
 
     if (!gOrigResume) gOrigResume = (void *)cur;
     method_setImplementation(m, (IMP)LCResume);
+    gSessionHooked = 1;
 }
 
 static void LCHookDelegateClass(Class cls) {
