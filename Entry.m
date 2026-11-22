@@ -125,17 +125,22 @@ static void LCStartupSchedulers(void) {
         // 先写 pending,10 秒后如果进程还活着再改成 ok / safe-ok
         LCWriteTag(LC_TAG_PENDING);
 
+        LCDiagLine([NSString stringWithFormat:@"==== launch %@ mode=%@ ====",
+                    LC_VER, full ? @"full" : @"safe"]);
+
+        // BoringSSL 层是纯数据段重绑,不改代码页,两种模式都装。
+        // 安全模式下关掉 inline hook 兜底,只保留最稳的那条路。
+        LCSetSSLMode(full);
+        LCHookSSL();
+
         if (full) {
-            // 主通道:NSURLSessionTask resume,签名固定,零风险
+            // 辅通道:NSURLSessionTask resume / TTNet 零参方法
             LCHookSession();
-            // 辅通道:TTNet 的零参数启动方法(若 task 不走 NSURLSession)
             LCHookTTNet();
-            // 主力:业务请求走 Cronet,只有 BoringSSL 层能拿到明文
-            LCHookSSL();
             LCRetryTTNet(0);
         } else {
-            LCHookInfo = @"safe-mode(上次启动崩溃,TTNet 通道已禁用)";
-            NSLog(@"[LC] 安全模式:TTNet 通道已禁用");
+            LCHookInfo = @"safe-mode(上次崩溃,Session/TTNet 禁用,SSL 仅重绑)";
+            NSLog(@"[LC] 安全模式:%@", LCHookInfo);
         }
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
