@@ -25,6 +25,14 @@
 - (NSUInteger)count;
 - (void)clear;
 - (NSArray<LCRecord *> *)snapshot;
+- (void)recordRequest:(NSURLRequest *)req
+             response:(NSURLResponse *)resp
+                 data:(NSData *)data
+                start:(NSDate *)start
+                  end:(NSDate *)end
+              reqBody:(NSData *)reqBody
+               source:(NSString *)source
+                error:(NSError *)err;
 - (NSDictionary *)buildHAR;
 - (NSString *)exportHAR;                 // 返回落盘路径
 - (NSString *)exportJSON;
