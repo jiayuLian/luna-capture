@@ -29,14 +29,17 @@ static volatile int gSkipped = 0;
 int LCSessionSeen(void);
 int LCSessionHooked(void);
 NSArray *LCDelegateClasses(void);
+int LCSslHooked(void);
+int LCSslSeen(void);
+const char *LCSslInfo(void);
 
 NSString *LCStatString(void) {
     NSArray *dl = LCDelegateClasses();
     NSString *ds = dl.count ? [dl componentsJoinedByString:@","] : @"none";
     if (ds.length > 160) ds = [ds substringToIndex:160];
-    return [NSString stringWithFormat:@"%@ seen:%d skip:%d | session:hook=%d rec=%d | dl:%@",
+    return [NSString stringWithFormat:@"%@ seen:%d skip:%d | session:hook=%d rec=%d | %s sslrec=%d | dl:%@",
             LCHookInfo ?: @"ttnet:none", gSeen, gSkipped,
-            LCSessionHooked(), LCSessionSeen(), ds];
+            LCSessionHooked(), LCSessionSeen(), LCSslInfo(), LCSslSeen(), ds];
 }
 
 #pragma mark - 安全取值
