@@ -354,6 +354,79 @@ static UIView *LCFindCloseGestureView(UIView *v, CGRect winRect, int depth) {
     return nil;
 }
 
+#pragma mark - 广告关闭按钮（Lynx）
+
+// 广告播完后右上角那个「领取成功 ×」实测结构：
+//   UILynxView (280,47 94x32)  accessibilityLabel = "领取成功，关闭，按钮"
+//     LynxTextView "领取成功"
+//     BDImageView (8x8)        <- 那个 ×
+// 它不是 UIControl，文字也不在 UILabel 上，靠普通文案遍历找不到，
+// 必须读 accessibilityLabel。位置固定在右上角，顺手做个位置约束防误命中。
+static UIView *LCFindAdCloseIn(UIView *v, CGRect scr, int depth) {
+    if (!v || v.hidden || v.alpha < 0.03 || depth > 30) return nil;
+
+    if (![v isKindOfClass:[UIScrollView class]]) {
+        NSString *label = v.accessibilityLabel;
+        if (label.length) {
+            CGRect f = [v convertRect:v.bounds toView:nil];
+            BOOL topRight = (f.origin.x > scr.size.width * 0.48 &&
+                             f.origin.y < scr.size.height * 0.28 &&
+                             f.size.width >= 30 && f.size.height >= 16 &&
+                             f.size.width < scr.size.width * 0.8);
+            if (topRight &&
+                ([label containsString:@"领取成功"] ||
+                 [label containsString:@"关闭"])) {
+                return v;
+            }
+        }
+    }
+    for (UIView *s in [v.subviews reverseObjectEnumerator]) {
+        UIView *hit = LCFindAdCloseIn(s, scr, depth + 1);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+static UIView *LCFindAdCloseView(void) {
+    CGRect scr = [UIScreen mainScreen].bounds;
+    for (UIWindow *w in LCAllWindows()) {
+        UIView *hit = LCFindAdCloseIn(w, scr, 0);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+// 点 Lynx 视图。UILynxView 不响应 sendActions，依次试：
+//   1) accessibilityActivate —— Lynx 为 VoiceOver 保留了这条通道，最靠谱
+//   2) 手势 target/action
+//   3) 中心点 hitTest 找到真正吃掉触摸的子视图，再走 1/2
+static BOOL LCTapLynxView(UIView *v) {
+    if (!v) return NO;
+
+    if ([v respondsToSelector:@selector(accessibilityActivate)]) {
+        @try { if ([v accessibilityActivate]) return YES; } @catch (__unused NSException *e) {}
+    }
+    if (LCFireTapGesture(v)) return YES;
+
+    UIWindow *w = v.window;
+    if (w) {
+        CGPoint c = CGPointMake(v.bounds.size.width / 2.0, v.bounds.size.height / 2.0);
+        CGPoint p = [v convertPoint:c toView:w];
+        UIView *hit = [w hitTest:p withEvent:nil];
+        if (hit && hit != v) {
+            if ([hit respondsToSelector:@selector(accessibilityActivate)]) {
+                @try { if ([hit accessibilityActivate]) return YES; } @catch (__unused NSException *e) {}
+            }
+            if (LCFireTapGesture(hit)) return YES;
+            if ([hit isKindOfClass:[UIControl class]]) {
+                [(UIControl *)hit sendActionsForControlEvents:UIControlEventTouchUpInside];
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
 #pragma mark - 界面树
 
 static void LCDumpTreeWalk(UIView *v, int depth, NSMutableString *out) {
@@ -425,17 +498,28 @@ static BOOL LCTryFinishAd(void) {
     }
 
     // 2) 播完标记：右上角「领取成功 ×」。
-    //    用户实测：手动点它才会弹"要不要继续看广告"。
-    //    v3.5.0 漏了这一步，只会去找藏在弹窗里的两个按钮，永远等不到。
+    //    它是 UILynxView + accessibilityLabel="领取成功，关闭，按钮"，
+    //    走专用的 LCTapLynxView，不用普通文案匹配。
+    UIView *closeView = LCFindAdCloseView();
+    if (closeView) {
+        CGRect f = [closeView convertRect:closeView.bounds toView:nil];
+        BOOL ok = LCTapLynxView(closeView);
+        LCAutoLog(@"[ad] 命中关闭视图 <%@ %.0f,%.0f %.0fx%.0f> label=%@ → %@",
+                  NSStringFromClass([closeView class]),
+                  f.origin.x, f.origin.y, f.size.width, f.size.height,
+                  closeView.accessibilityLabel ?: @"nil",
+                  ok ? @"已点击" : @"点不动");
+        if (ok) { gAdClosing = YES; return YES; }
+        LCDumpAdViewTree();
+    }
+
+    // 2b) 普通文案兜底（万一 accessibilityLabel 变了）
     UIView *done = LCFindByTextAnywhere(@[@"领取成功", @"已获得", @"奖励已发放", @"点击领取"]);
     if (done) {
         BOOL ok = LCTapView(done);
-        LCAutoLog(@"[ad] 播完标记，点「%@」唤起二次奖励 <%@> %@",
-                  LCTextOfView(done), NSStringFromClass([done class]),
-                  ok ? @"ok" : @"fail");
+        LCAutoLog(@"[ad] 播完标记(文案)，点 <%@> %@",
+                  NSStringFromClass([done class]), ok ? @"ok" : @"fail");
         if (ok) { gAdClosing = YES; return YES; }
-        // 找到了但点不动，说明控件层次和预想的不一样，把树留下
-        LCDumpAdViewTree();
     }
 
     // 3) 明确写着退出的
