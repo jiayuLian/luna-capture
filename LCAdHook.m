@@ -250,33 +250,67 @@ static UIView *LCFindControlByText(UIView *v, NSArray<NSString *> *texts, int de
     return nil;
 }
 
-// 触发一次点击。UIControl 直接发事件；Lynx 那种靠手势的，
-// 从 _targets 里取 target/action 手动调用。
+// 从 UIGestureRecognizerTarget 里把 target/action 抠出来。
+// _action 是 SEL —— KVC 不支持 SEL，valueForKey 会抛异常，
+// 之前被 @catch 吞掉后这个函数就一直静默返回 NO，等于从没点过。
+// 所以这里用 object_getIvar + ivar 偏移直接读。
+static BOOL LCFireOneGesture(UIGestureRecognizer *g) {
+    Ivar tiv = class_getInstanceVariable([g class], "_targets");
+    if (!tiv) return NO;
+    NSArray *targets = nil;
+    @try { targets = object_getIvar(g, tiv); } @catch (__unused NSException *e) {}
+    if (![targets isKindOfClass:[NSArray class]]) return NO;
+
+    for (id t in targets) {
+        Class tc = object_getClass(t);
+        Ivar ti = class_getInstanceVariable(tc, "_target");
+        Ivar ai = class_getInstanceVariable(tc, "_action");
+
+        id tgt = nil;
+        if (ti) {
+            @try { tgt = object_getIvar(t, ti); } @catch (__unused NSException *e) {}
+        }
+        SEL sel = NULL;
+        if (ai) {
+            const char *enc = ivar_getTypeEncoding(ai);
+            if (enc && enc[0] == ':') {      // SEL 编码是 ":"
+                sel = *(SEL *)((char *)(__bridge void *)t + ivar_getOffset(ai));
+            }
+        }
+        // 万一 ivar 改名了，退回 KVC（action 是 NSString 的情况也在这里）
+        if (!sel) {
+            id act = nil;
+            @try { act = [t valueForKey:@"action"]; } @catch (__unused NSException *e) {}
+            if ([act isKindOfClass:[NSString class]]) sel = NSSelectorFromString((NSString *)act);
+            if (!tgt) { @try { tgt = [t valueForKey:@"target"]; } @catch (__unused NSException *e) {} }
+        }
+        if (!tgt || !sel) continue;
+        if (![tgt respondsToSelector:sel]) continue;
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(tgt, sel, g);
+            return YES;
+        } @catch (__unused NSException *e) {}
+    }
+    return NO;
+}
+
+// 触发一次点击。三条路依次试：
+//   1. UIControl 的 sendActions —— 原生按钮最稳
+//   2. accessibilityActivate —— UIAccessibility 的标准激活通道，
+//      Lynx / 自绘控件大多实现了它
+//   3. 手势 target/action 直调
 static BOOL LCFireTapGesture(UIView *v) {
+    // 2) accessibility 通道
+    if ([v respondsToSelector:@selector(accessibilityActivate)]) {
+        @try {
+            if ([v accessibilityActivate]) return YES;
+        } @catch (__unused NSException *e) {}
+    }
+    // 3) 手势
     for (UIView *cur = v; cur; cur = cur.superview) {
         for (UIGestureRecognizer *g in cur.gestureRecognizers) {
             if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
-            NSArray *targets = nil;
-            @try { targets = [g valueForKey:@"_targets"]; } @catch (__unused NSException *e) {}
-            for (id t in targets) {
-                id tgt = nil, act = nil;
-                @try {
-                    tgt = [t valueForKey:@"target"];
-                    act = [t valueForKey:@"action"];
-                } @catch (__unused NSException *e) {}
-                if (!tgt || !act) continue;
-                SEL sel = NULL;
-                if ([act isKindOfClass:[NSString class]]) {
-                    sel = NSSelectorFromString((NSString *)act);
-                } else if ([act isKindOfClass:[NSValue class]]) {
-                    sel = (SEL)[(NSValue *)act pointerValue];
-                }
-                if (!sel || ![tgt respondsToSelector:sel]) continue;
-                @try {
-                    ((void (*)(id, SEL, id))objc_msgSend)(tgt, sel, g);
-                    return YES;
-                } @catch (__unused NSException *e) {}
-            }
+            if (LCFireOneGesture(g)) return YES;
         }
     }
     return NO;
@@ -394,6 +428,8 @@ static BOOL LCTryFinishAd(void) {
                   LCTextOfView(done), NSStringFromClass([done class]),
                   ok ? @"ok" : @"fail");
         if (ok) { gAdClosing = YES; return YES; }
+        // 找到了但点不动，说明控件层次和预想的不一样，把树留下
+        LCDumpAdViewTree();
     }
 
     // 3) 明确写着退出的
@@ -484,17 +520,16 @@ static void LCTick(void) {
                        ([[NSDate date] timeIntervalSince1970] - gAdCloseTryAt >= 3);
             if (due) {
                 gAdCloseTryAt = [[NSDate date] timeIntervalSince1970];
+                // 到点第一次就把界面抓下来。等到"认不出"再抓往往来不及 ——
+                // 12 秒后就按坐标关掉了,dump 时界面已经回到福利页。
+                if (!gAdDumped) {
+                    gAdDumped = YES;
+                    LCAutoLog(@"[ad] 播够时长，先抓一次界面树再找按钮");
+                    LCDumpAdViewTree();
+                }
                 // 先认字：领取奖励 / 领取成功 / 坚持退出。
                 // 这些只会在广告播完之后出现,命中就说明真播够了。
                 if (!LCTryFinishAd()) {
-                    // 到点 8 秒还一个字都没认出来 —— 说明规则不对（文案改了
-                    // 或者控件藏在别的 window 里）。这时自动抓一次界面树,
-                    // 用户不用掐着时机去点菜单。每轮只抓一次。
-                    if (el > gAdPlaySeconds + 8 && !gAdDumped) {
-                        gAdDumped = YES;
-                        LCAutoLog(@"[ad] 认不出按钮，自动抓界面树");
-                        LCDumpAdViewTree();
-                    }
                     // 45 秒还没等到任何结束标记才退化成按坐标关,
                     // 之前 12 秒太早,把播完前的 × 当成了关闭按钮。
                     if (el > gAdPlaySeconds + 45) {
