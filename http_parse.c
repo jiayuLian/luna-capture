@@ -191,9 +191,23 @@ typedef struct {
     uint32_t sid;
     uint8_t *buf;
     size_t   len, cap;
+    // DATA frames need a separate accumulator: one response is split across
+    // several frames, and the old code emitted on the first one and released
+    // the slot, so every later frame was dropped (gzip preload / 20KB task page).
+    uint8_t *body;
+    size_t   blen, bcap;
+    // Decoded header fields, cached the moment END_HEADERS arrives.
+    // HPACK is a stateful table shared per connection: if we postpone decoding
+    // until END_STREAM, other streams' HEADERS get decoded in between and every
+    // later index resolves to the wrong string. So decode immediately, cache here.
+    char    *d_headers, *d_method, *d_path, *d_host;
+    int      d_status;
+    int      decoded;
     int      used;
     int      dir;
 } hp_pend;
+
+#define HP_BODY_MAX (8u * 1024u * 1024u)
 
 struct hp_conn {
     int decided;        // 0 未定 1 h1 2 h2
@@ -638,27 +652,36 @@ static size_t parse_h1(hp_conn_t *c, int dir, const uint8_t *b, size_t n,
 #define H2_DATA    0x0
 #define H2_CONT    0x9
 
-static void h2_emit(hp_conn_t *c, int dir, uint32_t sid,
-                    const uint8_t *hblk, size_t hblen,
-                    const uint8_t *body, size_t blen,
-                    void *ctx, hp_cb cb) {
+static void h2_decode_into(hp_conn_t *c, hp_pend *pd, int dir) {
+    if (!pd || pd->decoded) return;
+    hpack_decode(dir == 0 ? &c->preq : &c->presp,
+                 pd->buf, pd->len,
+                 &pd->d_headers, &pd->d_method, &pd->d_path, &pd->d_host,
+                 dir == 1 ? &pd->d_status : NULL);
+    pd->decoded = 1;
+}
+
+static void h2_emit_cached(int dir, uint32_t sid, hp_pend *pd,
+                           const uint8_t *body, size_t blen,
+                           void *ctx, hp_cb cb) {
     hp_msg_t m;
     memset(&m, 0, sizeof(m));
     m.is_request = dir == 0;
     m.stream_id = sid;
     m.proto = 2;
 
-    char *hdrs = NULL;
-    hpack_decode(dir == 0 ? &c->preq : &c->presp, hblk, hblen, &hdrs,
-                 &m.method, &m.path, &m.host,
-                 dir == 1 ? &m.status : NULL);
-    m.headers = hdrs;
-
+    // hp_msg_free() frees these, so hand it copies.
+    if (pd) {
+        if (pd->d_headers) m.headers = strdup(pd->d_headers);
+        if (pd->d_method)  m.method  = strdup(pd->d_method);
+        if (pd->d_path)    m.path    = strdup(pd->d_path);
+        if (pd->d_host)    m.host    = strdup(pd->d_host);
+        m.status = pd->d_status;
+    }
     if (blen) {
         m.body = (uint8_t *)malloc(blen);
         if (m.body) { memcpy(m.body, body, blen); m.body_len = blen; }
     }
-
     if (cb) cb(ctx, &m);
     hp_msg_free(&m);
 }
@@ -673,7 +696,20 @@ static hp_pend *pend_find(hp_conn_t *c, uint32_t sid, int dir) {
 
 static hp_pend *pend_new(hp_conn_t *c, uint32_t sid, int dir) {
     hp_pend *p = pend_find(c, sid, dir);
-    if (p) { p->len = 0; return p; }
+    if (p) {
+        // A fresh HEADERS on a reused slot must not inherit the previous
+        // decoded fields, or h2_decode_into would skip decoding (decoded==1)
+        // and report the old headers.
+        free(p->d_headers); p->d_headers = NULL;
+        free(p->d_method);  p->d_method  = NULL;
+        free(p->d_path);    p->d_path    = NULL;
+        free(p->d_host);    p->d_host    = NULL;
+        p->d_status = 0;
+        p->decoded = 0;
+        p->len = 0;
+        p->blen = 0;
+        return p;
+    }
     for (int i = 0; i < HP_PEND_MAX; i++) {
         if (!c->pend[i].used) {
             memset(&c->pend[i], 0, sizeof(hp_pend));
@@ -683,7 +719,11 @@ static hp_pend *pend_new(hp_conn_t *c, uint32_t sid, int dir) {
             return &c->pend[i];
         }
     }
-    // 槽满了,复用第 0 个
+    // Slot table full: release what slot 0 still holds, then reuse it.
+    free(c->pend[0].d_headers); free(c->pend[0].d_method);
+    free(c->pend[0].d_path);    free(c->pend[0].d_host);
+    c->pend[0].d_headers = c->pend[0].d_method = NULL;
+    c->pend[0].d_path = c->pend[0].d_host = NULL;
     memset(&c->pend[0], 0, sizeof(hp_pend));
     c->pend[0].used = 1;
     c->pend[0].sid = sid;
@@ -695,6 +735,13 @@ static void pend_release(hp_pend *p) {
     if (!p) return;
     p->used = 0;
     p->len = 0;
+    p->blen = 0;
+    free(p->d_headers); p->d_headers = NULL;
+    free(p->d_method);  p->d_method  = NULL;
+    free(p->d_path);    p->d_path    = NULL;
+    free(p->d_host);    p->d_host    = NULL;
+    p->d_status = 0;
+    p->decoded = 0;
 }
 
 // 解析 h2 帧流。返回消费字节数。
@@ -731,19 +778,22 @@ static size_t parse_h2(hp_conn_t *c, int dir, const uint8_t *b, size_t n,
                 buf_append(&pd->buf, &pd->len, &pd->cap, pl + p, blen);
             }
 
-            if (flags & 0x4) {            // END_HEADERS
-                if ((flags & 0x1) && pd) {   // 同时 END_STREAM:没有 body
-                    h2_emit(c, dir, sid, pd->buf, pd->len, NULL, 0, ctx, cb);
+            if ((flags & 0x4) && pd) {          // END_HEADERS
+                h2_decode_into(c, pd, dir);      // decode now, keep HPACK order
+                if (flags & 0x1) {               // END_STREAM: no body
+                    h2_emit_cached(dir, sid, pd, NULL, 0, ctx, cb);
                     pend_release(pd);
                 }
-                // 否则等 DATA 帧一起发
             }
         } else if (type == H2_CONT) {
             hp_pend *pd = pend_find(c, sid, dir);
             if (pd) buf_append(&pd->buf, &pd->len, &pd->cap, pl, len);
-            if ((flags & 0x4) && pd && (flags & 0x1)) {
-                h2_emit(c, dir, sid, pd->buf, pd->len, NULL, 0, ctx, cb);
-                pend_release(pd);
+            if ((flags & 0x4) && pd) {
+                h2_decode_into(c, pd, dir);
+                if (flags & 0x1) {
+                    h2_emit_cached(dir, sid, pd, NULL, 0, ctx, cb);
+                    pend_release(pd);
+                }
             }
         } else if (type == H2_DATA) {
             size_t p = 0;
@@ -751,12 +801,20 @@ static size_t parse_h2(hp_conn_t *c, int dir, const uint8_t *b, size_t n,
             if (flags & 0x8) { p = 1 + pl[0]; if (p > len) p = len; blen = len - p; }
 
             hp_pend *pd = pend_find(c, sid, dir);
-            if (pd) {
-                h2_emit(c, dir, sid, pd->buf, pd->len, pl + p, blen, ctx, cb);
+            if (!pd && blen > 0) pd = pend_new(c, sid, dir);
+
+            // DATA may span several frames (max_frame_size + flow control).
+            // Accumulate and emit once on END_STREAM; the old code emitted on
+            // the first frame and released it, so later frames were dropped.
+            if (pd && blen > 0 && pd->blen < HP_BODY_MAX) {
+                size_t room = HP_BODY_MAX - pd->blen;
+                buf_append(&pd->body, &pd->blen, &pd->bcap, pl + p,
+                           blen < room ? blen : room);
+            }
+
+            if ((flags & 0x1) && pd) {                  // END_STREAM
+                h2_emit_cached(dir, sid, pd, pd->body, pd->blen, ctx, cb);
                 pend_release(pd);
-            } else if (blen > 0) {
-                // 没有对应 HEADERS(已发过),单发 body
-                h2_emit(c, dir, sid, NULL, 0, pl + p, blen, ctx, cb);
             }
         } else if (type == 0x3) {         // RST_STREAM
             hp_pend *pd = pend_find(c, sid, dir);
@@ -783,7 +841,14 @@ void hp_conn_free(hp_conn_t *c) {
     if (!c) return;
     free(c->wbuf);
     free(c->rbuf);
-    for (int i = 0; i < HP_PEND_MAX; i++) free(c->pend[i].buf);
+    for (int i = 0; i < HP_PEND_MAX; i++) {
+        free(c->pend[i].buf);
+        free(c->pend[i].body);
+        free(c->pend[i].d_headers);
+        free(c->pend[i].d_method);
+        free(c->pend[i].d_path);
+        free(c->pend[i].d_host);
+    }
     dynt_clear(&c->preq);
     dynt_clear(&c->presp);
     free(c);
