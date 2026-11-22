@@ -48,3 +48,4 @@ void LCHookTTNet(void);
 // hook 诊断信息,导出 HAR 时写进 creator.comment,便于判断通道是否生效
 extern NSString *LCHookInfo;
 extern NSString *LCStatString(void);   // 通道状态 + 命中计数,写进 HAR 的 creator.comment
+extern NSString *LCCrashTail(void);    // 上次未捕获异常摘要,同样写进 comment
