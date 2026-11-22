@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v3.4.0"
+#define LC_VER @"v3.5.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -83,6 +83,8 @@ void LCAdNoteTaskPage(NSString *body, BOOL isBase64);  // addRecord 侧入口,�
 void LCAdTaskPageStats(void);                          // 导出日志时打一行汇总
 int  LCAdTaskPageSeen(void);
 int  LCAdTaskPageParsed(void);
+void LCDumpAdViewTree(void);        // 把当前界面结构写到 lc_view.txt
+void LCAutoLog(NSString *fmt, ...);
 // preload 响应进来时调一次,里面带 effective_inspire_time(本次要播多少秒)。
 // 写死时长会提前关广告,攒几次就触发风控。
 void LCAdNotePreloadResponse(NSString *body);

@@ -506,6 +506,7 @@ NSString *LCAutoExportLog(void) {
     NSArray *files = @[@[@"lc_auto.txt",   @"自动任务"],
                        @[@"lc_ssl.txt",    @"SSL 挂载"],
                        @[@"lc_hooked.txt", @"hook 清单"],
+                       @[@"lc_view.txt",   @"界面树"],
                        @[@"lc_state.txt",  @"启动状态"]];
     for (NSArray *pair in files) {
         NSString *name = pair[0];

@@ -125,8 +125,9 @@ static UIViewController *LCAppVC(void) {
 
     CGFloat pw = 250;
     CGFloat rowH = 46;
-    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"导出日志", @"自动领奖",
-                        @"广告全自动 ×10", @"停止广告", @"清空记录", @"关闭菜单"];
+    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"导出日志", @"导出界面树",
+                        @"自动领奖", @"广告全自动 ×10", @"停止广告",
+                        @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - pw) / 2.0,
@@ -156,9 +157,10 @@ static UIViewController *LCAppVC(void) {
         [row setTitle:titles[(NSUInteger)i] forState:UIControlStateNormal];
         UIColor *c = [UIColor darkTextColor];
         if (i == 2) c = [UIColor systemGreenColor];     // 导出日志
-        if (i == 3 || i == 4) c = [UIColor systemBlueColor];   // 自动领奖 / 广告
-        if (i == 5) c = [UIColor systemOrangeColor];    // 停止
-        if (i == 6) c = [UIColor systemRedColor];       // 清空记录
+        if (i == 3) c = [UIColor systemTealColor];      // 导出界面树
+        if (i == 4 || i == 5) c = [UIColor systemBlueColor];   // 自动领奖 / 广告
+        if (i == 6) c = [UIColor systemOrangeColor];    // 停止
+        if (i == 7) c = [UIColor systemRedColor];       // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -187,10 +189,15 @@ static UIViewController *LCAppVC(void) {
         case 0: [self lcExport:YES]; break;
         case 1: [self lcExport:NO];  break;
         case 2: [self exportLog]; break;
-        case 3: [self runAutoClaim]; break;
-        case 4: [self runAutoAd]; break;
-        case 5: [self stopAutoAd]; break;
-        case 6:
+        case 3:
+            LCDumpAdViewTree();
+            [self hideMenu];
+            [self toast:@"界面树已写入 lc_view.txt\n导出日志时一起带走"];
+            break;
+        case 4: [self runAutoClaim]; break;
+        case 5: [self runAutoAd]; break;
+        case 6: [self stopAutoAd]; break;
+        case 7:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;

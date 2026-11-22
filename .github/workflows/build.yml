@@ -49,7 +49,7 @@ jobs:
             echo "FAIL: substrate dependency leaked"; exit 1
           fi
           echo "--- version marker ---"
-          strings dist/luna_capture.dylib | grep -F "v3.4.0" || { echo "FAIL: no version marker"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "v3.5.0" || { echo "FAIL: no version marker"; exit 1; }
           echo "--- channels ---"
           strings dist/luna_capture.dylib | grep -F "TTHttpTask" >/dev/null || { echo "FAIL: no ttnet class"; exit 1; }
           strings dist/luna_capture.dylib | grep -F "didReceiveData" >/dev/null || { echo "FAIL: no session delegate"; exit 1; }
@@ -60,6 +60,8 @@ jobs:
           strings dist/luna_capture.dylib | grep -F "BecomeEffective" >/dev/null || { echo "FAIL: no effective hook"; exit 1; }
           strings dist/luna_capture.dylib | grep -F "didClickCloseWithInfo" >/dev/null || { echo "FAIL: no close hook"; exit 1; }
           strings dist/luna_capture.dylib | grep -F "music_incentive_ad" >/dev/null || { echo "FAIL: no token refresh"; exit 1; }
+          # 中文字符串在 Mach-O 里是 UTF-16，strings 搜不到；用 ASCII 符号名做断言
+          nm -gU dist/luna_capture.dylib 2>/dev/null | grep -F "LCDumpAdViewTree" >/dev/null || { echo "FAIL: no view tree dump"; exit 1; }
           echo "channels ok"
           echo "--- size ---"
           ls -l dist/luna_capture.dylib

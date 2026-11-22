@@ -162,6 +162,100 @@ static UIControl *LCFindCloseControl(UIView *v, CGRect winRect, int depth) {
     return nil;
 }
 
+// 取一个 view 上承载的文案。Lynx / 原生混排，文字可能落在
+// UILabel.text、UIButton 的 title、UITextView.text 或 accessibilityLabel。
+static NSString *LCTextOfView(UIView *v) {
+    NSMutableString *s = [NSMutableString string];
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        if (l.text.length) [s appendString:l.text];
+    }
+    if ([v isKindOfClass:[UITextView class]]) {
+        UITextView *t = (UITextView *)v;
+        if (t.text.length) [s appendString:t.text];
+    }
+    if ([v isKindOfClass:[UIButton class]]) {
+        UIButton *b = (UIButton *)v;
+        NSString *t = [b titleForState:UIControlStateNormal];
+        if (t.length) [s appendString:t];
+    }
+    if (v.accessibilityLabel.length) [s appendString:v.accessibilityLabel];
+    if (v.accessibilityValue.length) [s appendString:v.accessibilityValue];
+    return s;
+}
+
+// 按文案找可点控件。返回的可能是 UIControl，也可能只是普通 view(靠手势)。
+// 命中后优先往上找最近的可点祖先 —— Lynx 的按钮往往文字在子 label 上,
+// 真正的点击目标在几层之外。
+static UIView *LCFindControlByText(UIView *v, NSArray<NSString *> *texts, int depth) {
+    if (!v || v.hidden || v.alpha < 0.03 || depth > 30) return nil;
+
+    NSString *t = LCTextOfView(v);
+    if (t.length) {
+        for (NSString *want in texts) {
+            if (![t containsString:want]) continue;
+            UIView *cur = v;
+            for (int i = 0; i < 10 && cur; i++) {
+                if ([cur isKindOfClass:[UIControl class]] && ((UIControl *)cur).enabled) return cur;
+                if (cur.userInteractionEnabled && cur.gestureRecognizers.count > 0) return cur;
+                cur = cur.superview;
+            }
+            return v;
+        }
+    }
+    for (UIView *s in [v.subviews reverseObjectEnumerator]) {
+        UIView *hit = LCFindControlByText(s, texts, depth + 1);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+// 触发一次点击。UIControl 直接发事件；Lynx 那种靠手势的，
+// 从 _targets 里取 target/action 手动调用。
+static BOOL LCFireTapGesture(UIView *v) {
+    for (UIView *cur = v; cur; cur = cur.superview) {
+        for (UIGestureRecognizer *g in cur.gestureRecognizers) {
+            if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+            NSArray *targets = nil;
+            @try { targets = [g valueForKey:@"_targets"]; } @catch (__unused NSException *e) {}
+            for (id t in targets) {
+                id tgt = nil, act = nil;
+                @try {
+                    tgt = [t valueForKey:@"target"];
+                    act = [t valueForKey:@"action"];
+                } @catch (__unused NSException *e) {}
+                if (!tgt || !act) continue;
+                SEL sel = NULL;
+                if ([act isKindOfClass:[NSString class]]) {
+                    sel = NSSelectorFromString((NSString *)act);
+                } else if ([act isKindOfClass:[NSValue class]]) {
+                    sel = (SEL)[(NSValue *)act pointerValue];
+                }
+                if (!sel || ![tgt respondsToSelector:sel]) continue;
+                @try {
+                    ((void (*)(id, SEL, id))objc_msgSend)(tgt, sel, g);
+                    return YES;
+                } @catch (__unused NSException *e) {}
+            }
+        }
+    }
+    return NO;
+}
+
+static BOOL LCTapView(UIView *v) {
+    if (!v) return NO;
+    for (UIView *cur = v; cur; cur = cur.superview) {
+        if ([cur isKindOfClass:[UIControl class]]) {
+            UIControl *c = (UIControl *)cur;
+            if (c.enabled) {
+                [c sendActionsForControlEvents:UIControlEventTouchUpInside];
+                return YES;
+            }
+        }
+    }
+    return LCFireTapGesture(v);
+}
+
 // 有些关闭按钮是 UIImageView + UITapGestureRecognizer，不是 UIControl
 static UIView *LCFindCloseGestureView(UIView *v, CGRect winRect, int depth) {
     if (!v || v.hidden || v.alpha < 0.05 || depth > 24) return nil;
@@ -180,10 +274,87 @@ static UIView *LCFindCloseGestureView(UIView *v, CGRect winRect, int depth) {
     return nil;
 }
 
+#pragma mark - 界面树
+
+static void LCDumpTreeWalk(UIView *v, int depth, NSMutableString *out) {
+    if (!v || depth > 14) return;
+    CGRect f = v.frame;
+    NSString *t = LCTextOfView(v);
+    if (t.length > 40) t = [t substringToIndex:40];
+    NSMutableString *pad = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [pad appendString:@"  "];
+    [out appendFormat:@"%@%@ (%.0f,%.0f %.0fx%.0f)%@\n",
+     pad, NSStringFromClass([v class]),
+     f.origin.x, f.origin.y, f.size.width, f.size.height,
+     t.length ? [NSString stringWithFormat:@" \"%@\"", t] : @""];
+    for (UIView *s in v.subviews) LCDumpTreeWalk(s, depth + 1, out);
+}
+
+// 把当前界面结构写到 lc_view.txt。文案匹配不上时，靠这个直接改规则，
+// 不用用户再猜"那个按钮长什么样"。
+void LCDumpAdViewTree(void) {
+    UIWindow *kw = LCKeyWindow();
+    UIViewController *top = LCTopVC();
+    UIView *root = kw ?: top.view;
+    if (!root) { LCAutoLog(@"[view] 没有可 dump 的根视图"); return; }
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"LunaCapture %@  %@\n\n", LC_VER, [NSDate date]];
+    LCDumpTreeWalk(root, 0, out);
+
+    NSArray *ps = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                      NSUserDomainMask, YES);
+    if (ps.count == 0) return;
+    NSString *p = [ps.firstObject stringByAppendingPathComponent:@"lc_view.txt"];
+    [out writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    LCAutoLog(@"[view] 界面树已写入 lc_view.txt (%lu 字节)", (unsigned long)out.length);
+}
+
 #pragma mark - 自动关闭
 
 static void LCScheduleNext(void);
 id LCAdTrigger(void);
+
+// 广告播完会出现两种弹窗：
+//   「再看一个视频获得 +300 金币」 -> 领取奖励(继续看) / 坚持退出(结束)
+//   「领取成功 ×」                -> 直接关掉广告窗口
+// 以前只按坐标找右上角,结果总是点到第二种,把二次奖励跳过了。
+// 现在先认字:有「领取奖励」就接着看,轮次用完或没有才退出去。
+static BOOL LCTryFinishAd(void) {
+    UIWindow *kw = LCKeyWindow();
+    UIViewController *top = LCTopVC();
+    UIView *root = kw ?: top.view;
+    if (!root) return NO;
+
+    // 1) 二次奖励 —— 点了会直接开下一个广告，根本不回福利页
+    UIView *again = LCFindControlByText(root, @[@"领取奖励", @"再看一个", @"继续观看"], 0);
+    if (again) {
+        if (gAdRemain > 0) {
+            BOOL ok = LCTapView(again);
+            LCAutoLog(@"[ad] 二次奖励弹窗，点「领取奖励」接着看(%@) <%@>",
+                      ok ? @"已发送" : @"发送失败", NSStringFromClass([again class]));
+            if (ok) {
+                gAdRemain--;
+                // 新广告会再走一次 DidLoadSuccess，计时会被重置
+                gAdPlayStart = [[NSDate date] timeIntervalSince1970];
+                gAdCloseTryAt = [[NSDate date] timeIntervalSince1970];
+                return YES;
+            }
+        } else {
+            LCAutoLog(@"[ad] 轮次已用完，不再连看");
+        }
+    }
+
+    // 2) 明确写着退出的
+    UIView *quit = LCFindControlByText(root, @[@"坚持退出", @"残忍离开", @"放弃奖励"], 0);
+    if (quit) {
+        BOOL ok = LCTapView(quit);
+        LCAutoLog(@"[ad] 点「坚持退出」结束 <%@> %@",
+                  NSStringFromClass([quit class]), ok ? @"ok" : @"fail");
+        if (ok) { gAdClosing = YES; return YES; }
+    }
+    return NO;
+}
 
 static void LCForceCloseAd(void) {
     if (!gAdPlaying || gAdClosing) return;
@@ -256,17 +427,23 @@ static void LCTick(void) {
     if (gAdPlaying && !gAdSawClose) {
         NSTimeInterval el = [[NSDate date] timeIntervalSince1970] - gAdPlayStart;
         if (el >= gAdPlaySeconds) {
-            // 点关闭允许重试：第一次可能点到别的控件或按钮还没出来。
-            // 每 5 秒重试一次，最多重试到 kAdMinSeconds+25。
             BOOL due = (gAdCloseTryAt <= 0) ||
-                       ([[NSDate date] timeIntervalSince1970] - gAdCloseTryAt >= 5);
+                       ([[NSDate date] timeIntervalSince1970] - gAdCloseTryAt >= 3);
             if (due) {
                 gAdCloseTryAt = [[NSDate date] timeIntervalSince1970];
-                gAdClosing = NO;          // 解锁，让 LCForceCloseAd 真正执行
-                LCForceCloseAd();
+                // 先认字：领取奖励 / 坚持退出。这两个只会在广告播完之后出现,
+                // 所以命中就说明真的播够了,不会像按坐标那样提前关掉。
+                if (!LCTryFinishAd()) {
+                    // 12 秒内没等到结束弹窗（有的广告没有二次奖励），
+                    // 才退化成按坐标找右上角的 ×
+                    if (el > gAdPlaySeconds + 12) {
+                        gAdClosing = NO;   // 解锁，让 LCForceCloseAd 真正执行
+                        LCForceCloseAd();
+                    }
+                }
             }
-            if (el > gAdPlaySeconds + 25) {
-                LCAutoLog(@"[ad] %ld 秒还没关掉，放弃本轮", (long)(gAdPlaySeconds + 25));
+            if (el > gAdPlaySeconds + 45) {
+                LCAutoLog(@"[ad] %ld 秒还没结束，放弃本轮", (long)(gAdPlaySeconds + 45));
                 gAdSawClose = YES;        // 强行推进下一轮
             }
         }
