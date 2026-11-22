@@ -137,7 +137,7 @@ static UIViewController *LCAppVC(void) {
     CGFloat rowH = 46;
     NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"导出日志", @"导出界面树",
                         @"自动领奖", @"广告全自动 ×20", @"领时长 ×3",
-                        @"清理卡住的广告", @"停止广告",
+                        @"打开领时长页", @"清理卡住的广告", @"停止广告",
                         @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
@@ -170,9 +170,10 @@ static UIViewController *LCAppVC(void) {
         if (i == 2) c = [UIColor systemGreenColor];     // 导出日志
         if (i == 3) c = [UIColor systemTealColor];      // 导出界面树
         if (i == 4 || i == 5 || i == 6) c = [UIColor systemBlueColor];   // 领奖 / 广告 / 时长
-        if (i == 7) c = [UIColor systemPurpleColor];    // 清理卡住的广告
-        if (i == 8) c = [UIColor systemOrangeColor];    // 停止
-        if (i == 9) c = [UIColor systemRedColor];       // 清空记录
+        if (i == 7) c = [UIColor systemIndigoColor];    // 打开领时长页
+        if (i == 8) c = [UIColor systemPurpleColor];    // 清理卡住的广告
+        if (i == 9) c = [UIColor systemOrangeColor];    // 停止
+        if (i == 10) c = [UIColor systemRedColor];      // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -211,10 +212,18 @@ static UIViewController *LCAppVC(void) {
         case 6: [self runAutoDuration]; break;
         case 7:
             [self hideMenu];
+            if (LCAdOpenDurationPage()) {
+                [self toast:@"已发出 openURL\n看日志里的结果是 OK 还是失败"];
+            } else {
+                [self toast:@"还没有 schema\n先在金币页停一会儿再试"];
+            }
+            break;
+        case 8:
+            [self hideMenu];
             [self cleanStuckAd];
             break;
-        case 8: [self stopAutoAd]; break;
-        case 9:
+        case 9: [self stopAutoAd]; break;
+        case 10:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;

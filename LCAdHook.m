@@ -65,6 +65,8 @@ static NSInteger gDurRemain = 0;
 // 金币页是 Lynx 渲染的，里面没有能点的 UIKit 控件，只能靠 schema 打开活动页。
 static NSString *gDurSchema = nil;
 static NSString *gDurSchemaDate = nil;          // 只在当天有效，隔天必须换
+static NSTimeInterval gDurOpenAt = 0;           // 上次 openURL 的时刻，25 秒限流
+static int gDurOpenFails = 0;                   // 连续失败次数，到 3 就不再试
 static NSInteger gDurDone   = 0;
 static BOOL      gDurActive = NO;    // 接管中:广告关一次才记一次
 static NSTimeInterval gDurTapAt = 0;
@@ -1288,12 +1290,13 @@ static void LCDurationTick(void) {
     }
 
     // ② 用 schema 打开活动页。优先于文案点击 —— 金币页的按钮根本点不动。
-    if (gDurSchema.length > 20) {
-        gDurTapAt = now;
-        if (LCOpenSchema(gDurSchema)) {
-            LCAutoLog(@"[dur] 用 schema 打开领时长活动页");
-            return;
-        }
+    // 活动页加载要时间，25 秒内不重复 openURL，否则会一直重跳。
+    if (gDurSchema.length > 20 && gDurOpenFails < 3 &&
+        (gDurOpenAt <= 0 || now - gDurOpenAt > 25)) {
+        gDurOpenAt = now;
+        LCAutoLog(@"[dur] 用 schema 打开领时长活动页");
+        if (LCOpenSchema(gDurSchema)) return;
+        gDurOpenFails++;
     }
 
     // ③ 实在没有 schema 才退回文案点击
@@ -1307,13 +1310,30 @@ static void LCDurationTick(void) {
         return;
     }
 
-    // ③ 都没有 —— 记一次，等下一 tick
+    // ④ 什么都没有 —— 金币页是 Lynx 画的，UI 点不动，schema 也进不去时
+    // 只能请用户手动点一次。点进去之后 tick 会接手：找广告按钮 → 自动播 → 自动关。
     static NSTimeInterval lastWarn = 0;
     if (now - lastWarn > 20) {
         lastWarn = now;
-        LCAutoLog(@"[dur] 没找到「领时长」也没找到广告按钮，抓一次界面树");
+        if (gDurSchema.length <= 20) {
+            LCAutoLog(@"[dur] 还没拿到 schema，请等金币页刷出来再点一次");
+        } else {
+            LCAutoLog(@"[dur] 进不去活动页 —— 请手动点一次「领时长」，进去后我会接手");
+        }
         LCDumpAdViewTree();
     }
+}
+
+// 菜单「打开领时长页」用：单独验证 sslocal:// 路由通不通，
+// 不用等整个 ×3 流程跑一遍。
+BOOL LCAdOpenDurationPage(void) {
+    if (gDurSchema.length <= 20) {
+        LCAutoLog(@"[dur] 还没有 schema(需要先让金币任务页加载一次)");
+        return NO;
+    }
+    BOOL ok = LCOpenSchema(gDurSchema);
+    LCAutoLog(@"[dur] 手动打开活动页 -> %@", ok ? @"已发出" : @"失败");
+    return ok;
 }
 
 void LCAutoDuration(NSInteger times) {
@@ -1322,6 +1342,8 @@ void LCAutoDuration(NSInteger times) {
     gDurRemain = times;
     gDurDone = 0;
     gDurTapAt = 0;
+    gDurOpenAt = 0;
+    gDurOpenFails = 0;
     gDurActive = NO;
     LCAutoLog(@"[dur] 开始领时长 ×%ld", (long)times);
     if (gDurTimer) [gDurTimer invalidate];
