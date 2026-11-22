@@ -30,8 +30,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
-#include <mach/vm_region.h>
-#include <mach/mach_vm.h>
+
 
 void LCHookSSL(void);
 
@@ -368,41 +367,49 @@ static const char *kLCDataSegs[] = {
     "__DATA", "__DATA_CONST", "__DATA_DIRTY", "__AUTH", "__AUTH_CONST", NULL
 };
 
-static vm_prot_t lc_page_prot(void *addr) {
-    vm_address_t region = (vm_address_t)((uintptr_t)addr & ~(uintptr_t)0xFFF);
-    vm_size_t size = 0;
-    vm_region_basic_info_data_64_t info;
-    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t obj = MACH_PORT_NULL;
-    kern_return_t kr = vm_region_64(mach_task_self(), &region, &size,
-                                    VM_REGION_BASIC_INFO_64,
-                                    (vm_region_info_t)&info, &cnt, &obj);
-    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
-    if (kr != KERN_SUCCESS) return 0;
-    return info.protection;
+// 判断地址是否落在某个已加载镜像的可执行段里。
+// 不用 mach_vm_region:iOS SDK 的 mach_vm.h 是空壳,直接报 unsupported。
+static BOOL lc_addr_in_exec_image(void *addr) {
+    uintptr_t a = (uintptr_t)addr;
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const struct mach_header_64 *mh =
+            (const struct mach_header_64 *)_dyld_get_image_header(i);
+        if (!mh || mh->magic != MH_MAGIC_64) continue;
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+        const uint8_t *p = (const uint8_t *)(mh + 1);
+        for (uint32_t c = 0; c < mh->ncmds; c++) {
+            const struct load_command *lc = (const struct load_command *)p;
+            if (lc->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *sg =
+                    (const struct segment_command_64 *)lc;
+                if (sg->initprot & VM_PROT_EXECUTE) {
+                    uintptr_t s0 = (uintptr_t)(slide + sg->vmaddr);
+                    if (a >= s0 && a < s0 + (uintptr_t)sg->vmsize) return YES;
+                }
+            }
+            p += lc->cmdsize;
+        }
+    }
+    return NO;
 }
 
-// 8 字节对齐写入,必要时临时放开写权限,写完恢复原权限。
-static int lc_write_slot(void *slot, uint64_t val) {
-    vm_prot_t old = lc_page_prot(slot);
-    if (old == 0) return -1;
-
+// __DATA / __DATA_DIRTY 运行时一定可写,直接写;
+// __DATA_CONST 是 SG_READ_ONLY,先放开写权限(必要时私有拷贝),写完恢复只读。
+static int lc_write_slot(void *slot, uint64_t val, BOOL writable) {
     uintptr_t page = (uintptr_t)slot & ~(uintptr_t)0xFFF;
-    BOOL needRestore = !(old & VM_PROT_WRITE);
-
-    if (needRestore) {
+    if (!writable) {
         kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x4000,
-                                      false, old | VM_PROT_WRITE);
+                                      false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
         if (kr != KERN_SUCCESS) {
-            // __DATA_CONST 带 SG_READ_ONLY,先做私有拷贝再写
             kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false,
-                            old | VM_PROT_WRITE | VM_PROT_COPY);
+                            VM_PROT_READ | VM_PROT_WRITE);
         }
         if (kr != KERN_SUCCESS) return -2;
     }
     *(volatile uint64_t *)slot = val;
-    if (needRestore) {
-        vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false, old);
+    if (!writable) {
+        vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, false, VM_PROT_READ);
     }
     return 0;
 }
@@ -426,6 +433,9 @@ static int lc_rebind_main(uint64_t real, void *hook, int *failOut) {
                 if (strncmp(sg->segname, kLCDataSegs[i], 16) == 0) { want = YES; break; }
             }
             if (want && sg->filesize > 0) {
+                // 只有 __DATA / __DATA_DIRTY 是运行时恒定可写的
+                BOOL wr = (strncmp(sg->segname, "__DATA", 8) == 0) &&
+                          (strncmp(sg->segname, "__DATA_CONST", 16) != 0);
                 uint8_t *base = (uint8_t *)(uintptr_t)(slide + sg->vmaddr);
                 size_t n = (size_t)sg->filesize;
                 if (sg->vmsize < n) n = (size_t)sg->vmsize;
@@ -433,7 +443,7 @@ static int lc_rebind_main(uint64_t real, void *hook, int *failOut) {
                 for (size_t o = 0; o < n; o += 8) {
                     uint64_t v = *(volatile uint64_t *)(base + o);
                     if (v != real) continue;
-                    if (lc_write_slot(base + o, (uint64_t)(uintptr_t)hook) == 0) hits++;
+                    if (lc_write_slot(base + o, (uint64_t)(uintptr_t)hook, wr) == 0) hits++;
                     else fails++;
                 }
             }
@@ -457,30 +467,9 @@ static int lc_is_pc_relative(uint32_t ins) {
     return 0;
 }
 
-// 先确认 target 落在一个已映射的可执行区里,再动手。
-// 少了这一步,v1.5.0 就是拿一个野指针去 memcpy。
-static BOOL lc_exec_region(void *target, uintptr_t *baseOut, vm_size_t *sizeOut) {
-    vm_address_t region = (vm_address_t)target;
-    vm_size_t size = 0;
-    vm_region_basic_info_data_64_t info;
-    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t obj = MACH_PORT_NULL;
-    kern_return_t kr = vm_region_64(mach_task_self(), &region, &size,
-                                    VM_REGION_BASIC_INFO_64,
-                                    (vm_region_info_t)&info, &cnt, &obj);
-    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
-    if (kr != KERN_SUCCESS) return NO;
-    if (!(info.protection & VM_PROT_EXECUTE)) return NO;
-    if ((uintptr_t)target < (uintptr_t)region) return NO;
-    if ((uintptr_t)target >= (uintptr_t)region + (uintptr_t)size) return NO;
-    if (baseOut) *baseOut = (uintptr_t)region;
-    if (sizeOut) *sizeOut = size;
-    return YES;
-}
-
 static int lc_patch(void *target, void *replace, void **trampoline_out) {
     if (!target || !replace) return -1;
-    if (!lc_exec_region(target, NULL, NULL)) return -5;
+    if (!lc_addr_in_exec_image(target)) return -5;
 
     uint32_t *code = (uint32_t *)target;
     uint32_t backup[4];
