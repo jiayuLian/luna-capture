@@ -169,9 +169,17 @@ static BOOL LCInternalHas(NSString *k) {
     // 任务页响应里带着最新的 music_incentive_ad token(280 字符,一次一个)。
     // 广告自动化每轮都要换新 token —— 复用旧 token 服务端会回 1300003 服务异常。
     // base64 的响应(二进制)跳过,任务页永远是明文 JSON。
-    if (!rec.respIsBase64 && rec.respBody.length > 200 &&
-        [rec.url rangeOfString:@"/luna/treasure/task/page/v2"].location != NSNotFound) {
-        LCAdNotePageResponse(rec.respBody);
+    if (!rec.respIsBase64 && rec.respBody.length > 200) {
+        if ([rec.url rangeOfString:@"/luna/treasure/task/page/v2"].location != NSNotFound) {
+            LCAdNotePageResponse(rec.respBody);
+        }
+    }
+    // preload 响应里的 effective_inspire_time 决定这次广告要播多久。
+    // 15/20/30 都出现过，写死 16 秒会提前关掉，服务端按 preload 到 done 的
+    // 真实间隔算，攒几次就判"违规操作"。
+    if (!rec.respIsBase64 && rec.respBody.length > 50 &&
+        [rec.url rangeOfString:@"/api/ad/v1/inspire_preload/"].location != NSNotFound) {
+        LCAdNotePreloadResponse(rec.respBody);
     }
     NSUInteger n = 0;
     BOOL notify = NO;

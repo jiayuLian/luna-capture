@@ -31,9 +31,12 @@
 
 void LCAutoLog(NSString *fmt, ...);
 
-// 广告播满多久才允许关。抓包里 15 秒是服务端认定"有效曝光"的阈值，
-// 留 1 秒余量，低于这个值关闭会拿不到 reward token。
-static const NSInteger kAdMinSeconds = 16;
+// 广告要播多久，由服务端决定：inspire_preload 响应里的 effective_inspire_time
+// 实测出现过 15 / 20 / 30，还有 0（这时按 launch_duration 的 20 算）。
+// 写死 16 秒的后果：遇到 20/30 的广告会提前关掉，单次可能侥幸过，
+// 攒几次就被判"违规操作"——这正是跳过广告脚本被封的原因。
+// 所以这里改成运行时取，gAdPlaySeconds 由 LCAdNotePreloadResponse() 刷新。
+static NSInteger gAdPlaySeconds = 22;   // 默认 20 + 2 秒余量
 // 关掉之后再等一会儿让 App 把 do_action 发完，然后进下一轮
 static const NSInteger kAdCooldown   = 5;
 
@@ -247,7 +250,7 @@ static void LCTick(void) {
 
     if (gAdPlaying && !gAdSawClose) {
         NSTimeInterval el = [[NSDate date] timeIntervalSince1970] - gAdPlayStart;
-        if (el >= kAdMinSeconds) {
+        if (el >= gAdPlaySeconds) {
             // 点关闭允许重试：第一次可能点到别的控件或按钮还没出来。
             // 每 5 秒重试一次，最多重试到 kAdMinSeconds+25。
             BOOL due = (gAdCloseTryAt <= 0) ||
@@ -257,8 +260,8 @@ static void LCTick(void) {
                 gAdClosing = NO;          // 解锁，让 LCForceCloseAd 真正执行
                 LCForceCloseAd();
             }
-            if (el > kAdMinSeconds + 25) {
-                LCAutoLog(@"[ad] %ld 秒还没关掉，放弃本轮", (long)(kAdMinSeconds + 25));
+            if (el > gAdPlaySeconds + 25) {
+                LCAutoLog(@"[ad] %ld 秒还没关掉，放弃本轮", (long)(gAdPlaySeconds + 25));
                 gAdSawClose = YES;        // 强行推进下一轮
             }
         }
@@ -328,7 +331,7 @@ static void LCHandleDidLoad(NSString *tag) {
     gAdPlaying = YES;
     gAdClosing = NO;
     gAdPlayStart = [[NSDate date] timeIntervalSince1970];
-    LCAutoLog(@"[ad] 广告就绪(%@)，%ld 秒后自动关闭", tag, (long)kAdMinSeconds);
+    LCAutoLog(@"[ad] 广告就绪(%@)，%ld 秒后自动关闭", tag, (long)gAdPlaySeconds);
 }
 
 static void LCDidLoad1(id self, SEL _cmd, id ad) {
@@ -501,6 +504,29 @@ void LCAdNotePageResponse(NSString *body) {
     }
 }
 
+// Capture.m 在收到 /api/ad/v1/inspire_preload/ 响应时调这里。
+// 服务端在这个响应里指定本次广告要播多久，必须照着播，不能自己拍 16 秒。
+void LCAdNotePreloadResponse(NSString *body) {
+    if (body.length < 50) return;
+    NSData *d = [body dataUsingEncoding:NSUTF8StringEncoding];
+    if (!d) return;
+    id obj = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return;
+
+    NSNumber *v = ((NSDictionary *)obj)[@"effective_inspire_time"];
+    NSInteger need = v ? v.integerValue : 0;
+    if (need <= 0) need = 20;            // 0 表示不指定，按 launch_duration 的 20
+    NSInteger total = need + 2;          // 2 秒余量，卡点关闭容易被判提前
+    if (total < 18) total = 18;
+    if (total > 95) total = 95;
+
+    if (total != gAdPlaySeconds) {
+        LCAutoLog(@"[ad] 服务端要求播 %lds，阈值改为 %lds",
+                  (long)need, (long)total);
+    }
+    gAdPlaySeconds = total;
+}
+
 NSString *LCAdCurrentToken(void) {
     if (!gAdLock) return gAdFreshToken;
     [gAdLock lock];
@@ -608,8 +634,8 @@ void LCAdRun(NSInteger times) {
     gAdTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                repeats:YES
                                                  block:^(NSTimer *t) { LCTick(); }];
-    LCAutoLog(@"[ad] 开始 %ld 轮，每轮约 %ld 秒",
-              (long)times, (long)(kAdMinSeconds + kAdCooldown));
+    LCAutoLog(@"[ad] 开始 %ld 轮，按服务端要求播 %lds，每轮约 %ld 秒",
+              (long)times, (long)gAdPlaySeconds, (long)(gAdPlaySeconds + kAdCooldown));
 
     // 第一轮立刻来
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),

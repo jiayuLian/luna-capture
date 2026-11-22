@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v3.1.0"
+#define LC_VER @"v3.2.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -79,6 +79,9 @@ NSDictionary *LCAdEffectiveExtra(void);
 // 任务页响应进来时调一次,从中解出最新的 music_incentive_ad token。
 // 任务页每次刷新都会重新生成 token(Capture.m 在记录 /luna/treasure/task/page/v2 时调)。
 void LCAdNotePageResponse(NSString *body);
+// preload 响应进来时调一次,里面带 effective_inspire_time(本次要播多少秒)。
+// 写死时长会提前关广告,攒几次就触发风控。
+void LCAdNotePreloadResponse(NSString *body);
 NSString *LCAdCurrentToken(void);
 int  LCSslHooked(void);
 int  LCSslSeen(void);
