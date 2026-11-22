@@ -43,7 +43,9 @@ jobs:
             echo "FAIL: substrate dependency leaked"; exit 1
           fi
           echo "--- version marker ---"
-          strings dist/luna_capture.dylib | grep -F "v1.0.0" || { echo "FAIL: no version marker"; exit 1; }
+          strings dist/luna_capture.dylib | grep -F "v1.2.0" || { echo "FAIL: no version marker"; exit 1; }
+          echo "--- ttnet channel ---"
+          strings dist/luna_capture.dylib | grep -F "NetworkManagerChromium" || { echo "FAIL: no ttnet hook"; exit 1; }
           echo "--- size ---"
           ls -l dist/luna_capture.dylib
 
