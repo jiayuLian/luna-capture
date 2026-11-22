@@ -434,7 +434,7 @@ static BOOL LCIsMediaRequest(NSURLRequest *req) {
     // 播放器常见的分段标识
     NSString *u = [req.URL.absoluteString lowercaseString];
     if ([u containsString:@"bytestart="] || [u containsString:@"byteend="] ||
-        [u containsString="/video/tos/"] || [u containsString="/audio/tos/"]) {
+        [u containsString:@"/video/tos/"] || [u containsString:@"/audio/tos/"]) {
         return YES;
     }
     return NO;
