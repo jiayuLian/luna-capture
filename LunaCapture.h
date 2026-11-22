@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v2.0.0"
+#define LC_VER @"v2.1.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -64,6 +64,7 @@ BOOL LCAutoPrepare(void);              // 从已抓流量里取 base 与请求�
 void LCAutoRun(void);                  // 异步跑一轮,日志写 Documents/lc_auto.txt
 BOOL LCAutoBusy(void);
 NSString *LCAutoLogText(void);
+NSString *LCAutoExportLog(void);       // 合并 lc_auto/lc_ssl/lc_hooked/lc_state 成一个文件并返回路径
 void LCAutoLog(NSString *fmt, ...);    // 供其它模块写同一条日志流
 
 // 激励视频自动化:在进程内调 Lynx 的 jsb bridge,等价于用户点了「看广告」。
