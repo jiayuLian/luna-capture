@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v1.9.0"
+#define LC_VER @"v2.0.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -64,6 +64,16 @@ BOOL LCAutoPrepare(void);              // 从已抓流量里取 base 与请求�
 void LCAutoRun(void);                  // 异步跑一轮,日志写 Documents/lc_auto.txt
 BOOL LCAutoBusy(void);
 NSString *LCAutoLogText(void);
+void LCAutoLog(NSString *fmt, ...);    // 供其它模块写同一条日志流
+
+// 激励视频自动化:在进程内调 Lynx 的 jsb bridge,等价于用户点了「看广告」。
+// 广告由 App 自己拉自己播自己上报,签名与设备指纹全部由 App 生成。
+void LCAdHookInstall(void);
+BOOL LCAdHasTemplate(void);            // 是否已录到 paramModel(需手动点过一次广告)
+NSString *LCAdTemplateText(void);
+void LCAdRun(NSInteger times);         // 循环触发,每次间隔 48 秒
+BOOL LCAdBusy(void);
+NSDictionary *LCAdEffectiveExtra(void);
 int  LCSslHooked(void);
 int  LCSslSeen(void);
 const char *LCSslInfo(void);
