@@ -30,6 +30,10 @@ static volatile int gSessionHooked = 0;
 int LCSessionSeen(void) { return gSessionSeen; }
 int LCSessionHooked(void) { return gSessionHooked; }
 
+// 真正挂上的 delegate 类名,导出 HAR 时写进 comment
+static NSArray *gDelegateClasses = nil;
+NSArray *LCDelegateClasses(void) { return gDelegateClasses ?: @[]; }
+
 #pragma mark - 工具
 
 static id LCKVC(id obj, NSArray<NSString *> *keys) {
@@ -295,19 +299,55 @@ void LCHookSession(void) {
         if (c) LCHookResumeOn(c);
     }
 
+    // 全局扫描:不猜类名。
+    // __objc_methname 里确认过这两个 selector 是真实存在的,
+    // 说明有类实现了它们,扫出来就是真正的 delegate。
+    // 全量扫一遍约几十毫秒,只在前几轮重试里做。
+    static int gScanRounds = 0;
     NSMutableArray<NSString *> *hit = [NSMutableArray array];
-    for (NSString *n in @[@"TTNetURLSessionDelegate",
-                          @"TTNetSessionDelegate",
-                          @"BDNetworkSessionDelegate",
-                          @"TTNetworkManagerChromium"]) {
-        Class c = NSClassFromString(n);
-        if (!c) continue;
-        LCHookDelegateClass(c);
-        [hit addObject:n];
+
+    if (gScanRounds < 4) {
+        gScanRounds++;
+        SEL s1 = @selector(URLSession:dataTask:didReceiveData:);
+        SEL s2 = @selector(URLSession:task:didCompleteWithError:);
+
+        int num = objc_getClassList(NULL, 0);
+        if (num > 0) {
+            Class *classes = (Class *)malloc(sizeof(Class) * (size_t)num);
+            if (classes) {
+                num = objc_getClassList(classes, num);
+                for (int i = 0; i < num; i++) {
+                    Class c = classes[i];
+                    if (!c) continue;
+                    BOOL has1 = (class_getInstanceMethod(c, s1) != NULL);
+                    BOOL has2 = (class_getInstanceMethod(c, s2) != NULL);
+                    if (!has1 && !has2) continue;
+                    LCHookDelegateClass(c);
+                    const char *cn = class_getName(c);
+                    if (cn) [hit addObject:[NSString stringWithUTF8String:cn]];
+                }
+                free(classes);
+            }
+        }
     }
 
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSLog(@"[LC] session hook: resume + delegate %@", hit);
-    });
+    // 兜底:上面扫不到时按名字试
+    if (hit.count == 0) {
+        for (NSString *n in @[@"TTNetURLSessionDelegate",
+                              @"TTNetSessionDelegate",
+                              @"BDNetworkSessionDelegate"]) {
+            Class c = NSClassFromString(n);
+            if (!c) continue;
+            LCHookDelegateClass(c);
+            [hit addObject:n];
+        }
+    }
+
+    if (hit.count) {
+        gDelegateClasses = [hit copy];
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            NSLog(@"[LC] session hook: resume + delegate %@", hit);
+        });
+    }
 }
