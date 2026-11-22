@@ -162,7 +162,7 @@ static void LCSetupUI_inner(void) {
     CGFloat x = screen.size.width - size - 12;
     CGFloat y = screen.size.height * 0.35;
 
-    UIWindow *w = nil;
+    LCFloatWindow *w = nil;
     if (@available(iOS 13.0, *)) {
         for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
             if ([s isKindOfClass:[UIWindowScene class]]) {
