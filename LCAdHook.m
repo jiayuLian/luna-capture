@@ -438,19 +438,16 @@ static void LCForceCloseAd(void) {
     }
     if (!gv && top) gv = LCFindCloseGestureView(top.view, wr, 0);
     if (gv) {
-        UITapGestureRecognizer *tap =
-            [[UITapGestureRecognizer alloc] initWithTarget:nil action:NULL];
-        LCAutoLog(@"[ad] 手势视图 <%@>，模拟单击",
-                  NSStringFromClass([gv class]));
-        // 直接给 recognizer 的 target 发事件拿不到 target 列表，
-        // 所以走 hitTest 派发一次触摸更可靠
-        CGPoint p = [gv convertPoint:CGPointMake(gv.bounds.size.width / 2,
-                                                gv.bounds.size.height / 2)
-                              toView:kw];
-        [gv hitTest:p withEvent:nil];
-        // 兜底：直接 dismiss
+        LCAutoLog(@"[ad] 手势视图 <%@>，触发点击", NSStringFromClass([gv class]));
+        // 这里必须真的把 recognizer 的 target/action 调起来。
+        // 以前只做了 hitTest —— 那只算命中测试，不会触发手势，
+        // 结果每次都掉进下面的 dismiss，关闭不生效也不发奖。
+        if (LCFireTapGesture(gv)) {
+            LCAutoLog(@"[ad] 手势已触发");
+            return;
+        }
         [top dismissViewControllerAnimated:YES completion:nil];
-        LCAutoLog(@"[ad] 手势视图无 target，直接 dismiss");
+        LCAutoLog(@"[ad] 手势触发失败，直接 dismiss");
         return;
     }
 
