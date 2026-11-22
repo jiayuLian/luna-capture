@@ -63,6 +63,7 @@ static NSTimeInterval gAdPlayStart = 0;
 static NSTimeInterval gAdOpenAt = 0;
 static NSTimeInterval gAdCloseTryAt = 0;   // 上次尝试关闭的时刻，用于限流重试
 static BOOL gAdRetried = NO;               // 本轮是否已经重试过开广告
+static BOOL gAdDumped = NO;                // 本轮是否已经自动抓过界面树
 static NSTimer *gAdTimer = nil;
 
 #pragma mark - 工具
@@ -126,6 +127,45 @@ static UIWindow *LCKeyWindow(void) {
         }
     }
     return [UIApplication sharedApplication].keyWindow;
+}
+
+// 前向声明：下面两个工具函数要用到它们，而定义在后面
+static UIViewController *LCTopVC(void);
+static UIView *LCFindControlByText(UIView *v, NSArray<NSString *> *texts, int depth);
+
+// 激励视频几乎都跑在自己的 UIWindow 里，而且未必是 keyWindow。
+// 只遍历 keyWindow 会漏掉「再看一个视频」那个弹窗 —— 认字全部落空。
+// 这个函数返回全部可见 window，后加的在上面。
+static NSArray<UIWindow *> *LCAllWindows(void) {
+    NSMutableArray *arr = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+                if (!w.isHidden && w.alpha > 0.01 && w.bounds.size.width > 100) {
+                    [arr addObject:w];
+                }
+            }
+        }
+    } else {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (!w.isHidden && w.alpha > 0.01 && w.bounds.size.width > 100) {
+                [arr addObject:w];
+            }
+        }
+    }
+    return [[arr reverseObjectEnumerator] allObjects];
+}
+
+// 在所有 window 里按文案找可点控件
+static UIView *LCFindByTextAnywhere(NSArray<NSString *> *texts) {
+    for (UIWindow *w in LCAllWindows()) {
+        UIView *v = LCFindControlByText(w, texts, 0);
+        if (v) return v;
+    }
+    UIViewController *top = LCTopVC();
+    if (top.view) return LCFindControlByText(top.view, texts, 0);
+    return nil;
 }
 
 static UIViewController *LCTopVC(void) {
@@ -293,14 +333,17 @@ static void LCDumpTreeWalk(UIView *v, int depth, NSMutableString *out) {
 // 把当前界面结构写到 lc_view.txt。文案匹配不上时，靠这个直接改规则，
 // 不用用户再猜"那个按钮长什么样"。
 void LCDumpAdViewTree(void) {
-    UIWindow *kw = LCKeyWindow();
-    UIViewController *top = LCTopVC();
-    UIView *root = kw ?: top.view;
-    if (!root) { LCAutoLog(@"[view] 没有可 dump 的根视图"); return; }
+    NSArray<UIWindow *> *wins = LCAllWindows();
+    if (wins.count == 0) { LCAutoLog(@"[view] 没有可 dump 的 window"); return; }
 
     NSMutableString *out = [NSMutableString string];
-    [out appendFormat:@"LunaCapture %@  %@\n\n", LC_VER, [NSDate date]];
-    LCDumpTreeWalk(root, 0, out);
+    [out appendFormat:@"LunaCapture %@  %@  共 %lu 个 window\n",
+     LC_VER, [NSDate date], (unsigned long)wins.count];
+    for (UIWindow *w in wins) {
+        [out appendFormat:@"\n===== %@ key=%d level=%.0f =====\n",
+         NSStringFromClass([w class]), (int)w.isKeyWindow, w.windowLevel];
+        LCDumpTreeWalk(w, 0, out);
+    }
 
     NSArray *ps = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                       NSUserDomainMask, YES);
@@ -321,13 +364,9 @@ id LCAdTrigger(void);
 // 以前只按坐标找右上角,结果总是点到第二种,把二次奖励跳过了。
 // 现在先认字:有「领取奖励」就接着看,轮次用完或没有才退出去。
 static BOOL LCTryFinishAd(void) {
-    UIWindow *kw = LCKeyWindow();
-    UIViewController *top = LCTopVC();
-    UIView *root = kw ?: top.view;
-    if (!root) return NO;
 
     // 1) 二次奖励 —— 点了会直接开下一个广告，根本不回福利页
-    UIView *again = LCFindControlByText(root, @[@"领取奖励", @"再看一个", @"继续观看"], 0);
+    UIView *again = LCFindByTextAnywhere(@[@"领取奖励", @"再看一个", @"继续观看"]);
     if (again) {
         if (gAdRemain > 0) {
             BOOL ok = LCTapView(again);
@@ -345,8 +384,20 @@ static BOOL LCTryFinishAd(void) {
         }
     }
 
-    // 2) 明确写着退出的
-    UIView *quit = LCFindControlByText(root, @[@"坚持退出", @"残忍离开", @"放弃奖励"], 0);
+    // 2) 播完标记：右上角「领取成功 ×」。
+    //    用户实测：手动点它才会弹"要不要继续看广告"。
+    //    v3.5.0 漏了这一步，只会去找藏在弹窗里的两个按钮，永远等不到。
+    UIView *done = LCFindByTextAnywhere(@[@"领取成功", @"已获得", @"奖励已发放", @"点击领取"]);
+    if (done) {
+        BOOL ok = LCTapView(done);
+        LCAutoLog(@"[ad] 播完标记，点「%@」唤起二次奖励 <%@> %@",
+                  LCTextOfView(done), NSStringFromClass([done class]),
+                  ok ? @"ok" : @"fail");
+        if (ok) { gAdClosing = YES; return YES; }
+    }
+
+    // 3) 明确写着退出的
+    UIView *quit = LCFindByTextAnywhere(@[@"坚持退出", @"残忍离开", @"放弃奖励"]);
     if (quit) {
         BOOL ok = LCTapView(quit);
         LCAutoLog(@"[ad] 点「坚持退出」结束 <%@> %@",
@@ -360,15 +411,16 @@ static void LCForceCloseAd(void) {
     if (!gAdPlaying || gAdClosing) return;
     gAdClosing = YES;
 
-    UIWindow *kw = LCKeyWindow();
-    CGRect wr = kw ? kw.bounds : [UIScreen mainScreen].bounds;
-
+    CGRect wr = [UIScreen mainScreen].bounds;
     UIViewController *top = LCTopVC();
-    UIView *root = kw ?: top.view;
 
     // 1) 优先点真的关闭按钮 —— 只有这条路径会走 SDK 的
     //    __handleRewardVideoCloseWithAdVideoModel:，进而触发 do_action
-    UIControl *btn = LCFindCloseControl(root, wr, 0);
+    UIControl *btn = nil;
+    for (UIWindow *w in LCAllWindows()) {
+        btn = LCFindCloseControl(w, wr, 0);
+        if (btn) break;
+    }
     if (!btn && top) btn = LCFindCloseControl(top.view, wr, 0);
     if (btn) {
         LCAutoLog(@"[ad] 点关闭按钮 <%@ %.0fx%.0f>",
@@ -379,7 +431,11 @@ static void LCForceCloseAd(void) {
     }
 
     // 2) 退化到带手势的图片按钮
-    UIView *gv = LCFindCloseGestureView(root, wr, 0);
+    UIView *gv = nil;
+    for (UIWindow *w in LCAllWindows()) {
+        gv = LCFindCloseGestureView(w, wr, 0);
+        if (gv) break;
+    }
     if (!gv && top) gv = LCFindCloseGestureView(top.view, wr, 0);
     if (gv) {
         UITapGestureRecognizer *tap =
@@ -431,12 +487,20 @@ static void LCTick(void) {
                        ([[NSDate date] timeIntervalSince1970] - gAdCloseTryAt >= 3);
             if (due) {
                 gAdCloseTryAt = [[NSDate date] timeIntervalSince1970];
-                // 先认字：领取奖励 / 坚持退出。这两个只会在广告播完之后出现,
-                // 所以命中就说明真的播够了,不会像按坐标那样提前关掉。
+                // 先认字：领取奖励 / 领取成功 / 坚持退出。
+                // 这些只会在广告播完之后出现,命中就说明真播够了。
                 if (!LCTryFinishAd()) {
-                    // 12 秒内没等到结束弹窗（有的广告没有二次奖励），
-                    // 才退化成按坐标找右上角的 ×
-                    if (el > gAdPlaySeconds + 12) {
+                    // 到点 8 秒还一个字都没认出来 —— 说明规则不对（文案改了
+                    // 或者控件藏在别的 window 里）。这时自动抓一次界面树,
+                    // 用户不用掐着时机去点菜单。每轮只抓一次。
+                    if (el > gAdPlaySeconds + 8 && !gAdDumped) {
+                        gAdDumped = YES;
+                        LCAutoLog(@"[ad] 认不出按钮，自动抓界面树");
+                        LCDumpAdViewTree();
+                    }
+                    // 45 秒还没等到任何结束标记才退化成按坐标关,
+                    // 之前 12 秒太早,把播完前的 × 当成了关闭按钮。
+                    if (el > gAdPlaySeconds + 45) {
                         gAdClosing = NO;   // 解锁，让 LCForceCloseAd 真正执行
                         LCForceCloseAd();
                     }
@@ -789,6 +853,7 @@ id LCAdTrigger(void) {
     gAdOpenAt = [[NSDate date] timeIntervalSince1970];
     gAdCloseTryAt = 0;
     gAdRetried = NO;
+    gAdDumped = NO;
 
     @try {
         // 精确签名直调，不用 NSInvocation —— 之前用 NSInvocation 转发
