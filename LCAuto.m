@@ -32,7 +32,7 @@ static NSLock *gAutoLock = nil;
 
 #pragma mark - 日志
 
-static void LCAutoLog(NSString *fmt, ...) {
+void LCAutoLog(NSString *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
