@@ -18,8 +18,9 @@ jobs:
           git clone --recursive -q https://github.com/theos/theos.git "$THEOS"
           mkdir -p "$THEOS/sdks"
           cd "$THEOS/sdks"
-          curl -sL -o sdk.zip https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.zip
-          unzip -q sdk.zip
+          curl -sL -o sdk.tar.xz https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz
+          tar -xf sdk.tar.xz
+          rm -f sdk.tar.xz
           ls -d *.sdk
 
       - name: Build
