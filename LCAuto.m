@@ -466,3 +466,44 @@ void LCAutoRun(void) {
 }
 
 BOOL LCAutoBusy(void) { return gAutoRunning; }
+
+// 把全部日志合并成一个文件导出。
+// 沙盒 Documents 在「文件」App 里看不到(Info.plist 没开 UIFileSharingEnabled,
+// TrollFools 注入也改不了 plist),所以只能走系统分享面板，和 HAR 一样。
+NSString *LCAutoExportLog(void) {
+    NSArray *ps = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                      NSUserDomainMask, YES);
+    if (ps.count == 0) return nil;
+    NSString *dir = ps.firstObject;
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"LunaCapture %@\n", LC_VER];
+    [out appendFormat:@"导出时间 %@\n", [NSDate date]];
+
+    NSArray *files = @[@[@"lc_auto.txt",   @"自动任务"],
+                       @[@"lc_ssl.txt",    @"SSL 挂载"],
+                       @[@"lc_hooked.txt", @"hook 清单"],
+                       @[@"lc_state.txt",  @"启动状态"]];
+    for (NSArray *pair in files) {
+        NSString *name = pair[0];
+        NSString *p = [dir stringByAppendingPathComponent:name];
+        NSString *body = [NSString stringWithContentsOfFile:p
+                                                  encoding:NSUTF8StringEncoding
+                                                     error:NULL];
+        [out appendFormat:@"\n========== %@ (%@) ==========\n", name, pair[1]];
+        [out appendString:(body.length ? body : @"(空)")];
+        [out appendString:@"\n"];
+    }
+
+    NSDateFormatter *f = [NSDateFormatter new];
+    f.dateFormat = @"MMdd_HHmmss";
+    NSString *outPath = [dir stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"luna_log_%@.txt", [f stringFromDate:[NSDate date]]]];
+
+    NSError *err = nil;
+    if (![out writeToFile:outPath atomically:YES encoding:NSUTF8StringEncoding error:&err]) {
+        LCAutoLog(@"写日志失败: %@", err.localizedDescription);
+        return nil;
+    }
+    return outPath;
+}
