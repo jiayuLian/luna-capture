@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v1.0.0"
+#define LC_VER @"v1.2.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -41,3 +41,10 @@
 
 void LCSetupUI(void);
 void LCHookAll(void);
+
+// TTNet(Cronet)门面层旁路。iOS 版汽水业务请求全走这里,NSURLSession 只承载少量 CDN JSON。
+void LCHookTTNet(void);
+
+// hook 诊断信息,导出 HAR 时写进 creator.comment,便于判断通道是否生效
+extern NSString *LCHookInfo;
+extern NSString *LCStatString(void);   // 通道状态 + 命中计数,写进 HAR 的 creator.comment
