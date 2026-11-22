@@ -40,6 +40,27 @@ static void LCWriteState(NSString *s) {
     } @catch (NSException *e) {}
 }
 
+// 状态里带版本号:换了 dylib 版本就重新试一次完整模式。
+// 否则一旦降级过,新版本永远进不去,用户只能手动删文件。
+static void LCWriteTag(NSString *tag) {
+    LCWriteState([NSString stringWithFormat:@"%@|%@", tag, LC_VER]);
+}
+
+static BOOL LCShouldUseFullMode(void) {
+    NSString *st = LCReadState();
+    if (st.length == 0) return YES;                 // 首次
+
+    NSArray *parts = [st componentsSeparatedByString:@"|"];
+    NSString *tag = parts.count > 0 ? parts[0] : @"";
+    NSString *ver = parts.count > 1 ? parts[1] : @"";
+
+    if (![ver isEqualToString:LC_VER]) return YES;  // 版本变了,重新试
+
+    if ([tag isEqualToString:LC_TAG_SAFE]) return NO;      // 降级过,保持
+    if ([tag isEqualToString:LC_TAG_PENDING]) return NO;   // 上次没走完 = 崩了
+    return YES;
+}
+
 static NSUncaughtExceptionHandler *gPrevHandler = NULL;
 
 // 把上次崩溃的异常摘要塞进 HAR 的 comment。
@@ -73,7 +94,7 @@ static void LCExceptionHandler(NSException *e) {
             NSString *p = [d stringByAppendingPathComponent:@"lc_crash.log"];
             [s writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL];
             // 标记本次未走完,下次启动自动降级为安全模式
-            LCWriteState(LC_TAG_PENDING);
+            LCWriteTag(LC_TAG_PENDING);
         }
     } @catch (NSException *ignored) {}
 
@@ -97,13 +118,10 @@ static void LCRetryTTNet(int tries) {
 static void LCStartupSchedulers(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        NSString *st = LCReadState();
-        BOOL full = YES;
-        if ([st hasPrefix:@"safe"]) full = NO;         // 已降级过,保持
-        else if ([st hasPrefix:@"pending"]) full = NO; // 上次没走完 = 崩了
+        BOOL full = LCShouldUseFullMode();
 
         // 先写 pending,10 秒后如果进程还活着再改成 ok / safe-ok
-        LCWriteState(LC_TAG_PENDING);
+        LCWriteTag(LC_TAG_PENDING);
 
         if (full) {
             LCHookTTNet();
@@ -115,7 +133,7 @@ static void LCStartupSchedulers(void) {
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            LCWriteState(full ? LC_TAG_OK : LC_TAG_SAFE);
+            LCWriteTag(full ? LC_TAG_OK : LC_TAG_SAFE);
         });
     });
 }
