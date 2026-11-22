@@ -64,6 +64,7 @@ static NSTimeInterval gAdOpenAt = 0;
 static NSTimeInterval gAdCloseTryAt = 0;   // 上次尝试关闭的时刻，用于限流重试
 static BOOL gAdRetried = NO;               // 本轮是否已经重试过开广告
 static BOOL gAdDumped = NO;                // 本轮是否已经自动抓过界面树
+static NSTimeInterval gAdEffectiveAt = 0;  // becomeEffective 回调时刻，仅用于日志
 static NSTimer *gAdTimer = nil;
 
 #pragma mark - 工具
@@ -185,6 +186,8 @@ static UIViewController *LCTopVC(void) {
 static UIControl *LCFindCloseControl(UIView *v, CGRect winRect, int depth) {
     if (!v || v.hidden || v.alpha < 0.05 || !v.userInteractionEnabled) return nil;
     if (depth > 24) return nil;
+    // 滚动容器不是按钮，整棵子树跳过
+    if ([v isKindOfClass:[UIScrollView class]]) return nil;
 
     if ([v isKindOfClass:[UIControl class]]) {
         UIControl *c = (UIControl *)v;
@@ -333,6 +336,9 @@ static BOOL LCTapView(UIView *v) {
 // 有些关闭按钮是 UIImageView + UITapGestureRecognizer，不是 UIControl
 static UIView *LCFindCloseGestureView(UIView *v, CGRect winRect, int depth) {
     if (!v || v.hidden || v.alpha < 0.05 || depth > 24) return nil;
+    // LynxScrollView 是 Lynx 的滚动容器，几乎占满全屏又带手势，
+    // 之前一直被当成"右上角关闭按钮"点，点了当然没反应。
+    if ([v isKindOfClass:[UIScrollView class]]) return nil;
     if (v.gestureRecognizers.count > 0 && v.userInteractionEnabled) {
         CGRect f = [v convertRect:v.bounds toView:nil];
         if (f.origin.x > winRect.size.width * 0.52 &&
@@ -444,8 +450,9 @@ static BOOL LCTryFinishAd(void) {
 }
 
 static void LCForceCloseAd(void) {
-    if (!gAdPlaying || gAdClosing) return;
-    gAdClosing = YES;
+    // 不再用 gAdClosing 拦住重试 —— 一次点不到很常见（按钮晚出现、
+    // 点到滚动容器等），重试节奏由 LCTick 的 gAdCloseTryAt 每 10 秒限流。
+    if (!gAdPlaying) return;
 
     CGRect wr = [UIScreen mainScreen].bounds;
     UIViewController *top = LCTopVC();
@@ -482,20 +489,18 @@ static void LCForceCloseAd(void) {
             LCAutoLog(@"[ad] 手势已触发");
             return;
         }
-        [top dismissViewControllerAnimated:YES completion:nil];
-        LCAutoLog(@"[ad] 手势触发失败，直接 dismiss");
+        // 以前这里直接 dismiss 顶层 VC。dismiss 能关掉广告界面，但是
+        // ① 不触发 SDK 的结算回调 ② 不弹「再看一个视频」③ 之后 close 回调
+        // 也不会来，整轮就卡死。改成什么都不做，交给 LCTick 下一轮重试。
+        LCAutoLog(@"[ad] 手势触发失败，不下 dismiss，等下一轮");
         return;
     }
 
-    // 3) 最后兜底：dismiss 顶层 VC。
-    //    这条路能关掉广告但不一定发奖，日志里会标出来便于判断。
-    if (top.presentingViewController) {
-        LCAutoLog(@"[ad] 没找到关闭按钮，dismiss <%@>",
-                  NSStringFromClass([top class]));
-        [top dismissViewControllerAnimated:YES completion:nil];
-    } else {
-        LCAutoLog(@"[ad] 顶层 VC 不是 modal，无法关闭");
-    }
+    // 3) 一个可点控件都没找到。
+    //    以前在这里 dismiss 顶层 VC —— 能关掉界面但拿不到奖励，还会让
+    //    后面的 close 回调永远不来。现在只记录，LCTick 会继续重试。
+    LCAutoLog(@"[ad] 没找到可点的关闭控件(顶层 %@)，等下一轮",
+              top ? NSStringFromClass([top class]) : @"nil");
 }
 
 static void LCTick(void) {
@@ -516,31 +521,32 @@ static void LCTick(void) {
     if (gAdPlaying && !gAdSawClose) {
         NSTimeInterval el = [[NSDate date] timeIntervalSince1970] - gAdPlayStart;
         if (el >= gAdPlaySeconds) {
+            // 播完之后再抓界面树才有意义。22 秒抓到的还是播放中的画面。
+            if (!gAdDumped && el > gAdPlaySeconds + 10) {
+                gAdDumped = YES;
+                LCAutoLog(@"[ad] 抓界面树(%.0fs)，同时找结束按钮", el);
+                LCDumpAdViewTree();
+            }
+
             BOOL due = (gAdCloseTryAt <= 0) ||
                        ([[NSDate date] timeIntervalSince1970] - gAdCloseTryAt >= 3);
             if (due) {
                 gAdCloseTryAt = [[NSDate date] timeIntervalSince1970];
-                // 到点第一次就把界面抓下来。等到"认不出"再抓往往来不及 ——
-                // 12 秒后就按坐标关掉了,dump 时界面已经回到福利页。
-                if (!gAdDumped) {
-                    gAdDumped = YES;
-                    LCAutoLog(@"[ad] 播够时长，先抓一次界面树再找按钮");
-                    LCDumpAdViewTree();
-                }
-                // 先认字：领取奖励 / 领取成功 / 坚持退出。
-                // 这些只会在广告播完之后出现,命中就说明真播够了。
                 if (!LCTryFinishAd()) {
-                    // 45 秒还没等到任何结束标记才退化成按坐标关,
-                    // 之前 12 秒太早,把播完前的 × 当成了关闭按钮。
-                    if (el > gAdPlaySeconds + 45) {
-                        gAdClosing = NO;   // 解锁，让 LCForceCloseAd 真正执行
+                    // 认字全落空（有的广告确实没有二次奖励），
+                    // 等够 40 秒再退化成"点可点控件"，而且绝不 dismiss。
+                    if (el > gAdPlaySeconds + 40) {
                         LCForceCloseAd();
                     }
                 }
             }
-            if (el > gAdPlaySeconds + 45) {
-                LCAutoLog(@"[ad] %ld 秒还没结束，放弃本轮", (long)(gAdPlaySeconds + 45));
-                gAdSawClose = YES;        // 强行推进下一轮
+
+            // 90 秒是硬上限。到这儿说明 SDK 完全没给任何锚点,
+            // 只推进轮次，不强行 dismiss（留着现场给下一次 dump）。
+            if (el > gAdPlaySeconds + 90) {
+                LCAutoLog(@"[ad] %ld 秒还没结束，放弃本轮（界面可能卡在广告页）",
+                          (long)(gAdPlaySeconds + 90));
+                gAdSawClose = YES;
             }
         }
     } else if (gAdOpening) {
@@ -640,10 +646,16 @@ static void LCHandleEffective(id extra, long idx) {
         LCAutoLog(@"[ad] 生效 extra(%ld)=%@", idx,
                   t.length > 700 ? [t substringToIndex:700] : t);
     }
-    // 生效即说明时长够了，不用等满 kAdMinSeconds，立刻关
-    if (gAdBusy && gAdPlaying && !gAdClosing) {
-        LCAutoLog(@"[ad] 已生效，提前关闭");
-        LCForceCloseAd();
+    // !!! 这里以前是"已生效，提前关闭" !!!
+    // becomeEffective 的真实含义是「这次曝光算有效，可以结算了」，
+    // 不是「视频播完了」。实测 15 秒就回调，而广告是 30 秒的。
+    // 在这时候关，等于把「领取成功 ×」和「再看一个视频 +300」全跳过了,
+    // 用户看到的就是"广告突然没了，直接回福利页"。
+    // 现在只记时间，关闭统一交给 LCTick 按文案判断。
+    if (gAdBusy && gAdPlaying) {
+        gAdEffectiveAt = [[NSDate date] timeIntervalSince1970];
+        LCAutoLog(@"[ad] 曝光已生效(%.0fs)，继续播，等广告自己结束",
+                  gAdEffectiveAt - gAdPlayStart);
     }
 }
 
@@ -886,6 +898,7 @@ id LCAdTrigger(void) {
     gAdCloseTryAt = 0;
     gAdRetried = NO;
     gAdDumped = NO;
+    gAdEffectiveAt = 0;
 
     @try {
         // 精确签名直调，不用 NSInvocation —— 之前用 NSInvocation 转发
