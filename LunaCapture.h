@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v1.4.1"
+#define LC_VER @"v1.5.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -51,6 +51,13 @@ void LCHookSession(void);
 
 // 跨通道去重:同一请求被两条通道各碰一次时只放一条过
 BOOL LCTryClaimURL(NSString *url, NSString *method);
+
+// BoringSSL 层:inline hook SSL_read / SSL_write,拿 TLS 明文。
+// 业务请求不经 NSURLSession 时,这是唯一能拿到内容的地方。
+void LCHookSSL(void);
+int  LCSslHooked(void);
+int  LCSslSeen(void);
+const char *LCSslInfo(void);
 
 // hook 诊断信息,导出 HAR 时写进 creator.comment,便于判断通道是否生效
 extern NSString *LCHookInfo;
