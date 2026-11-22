@@ -58,6 +58,13 @@ static volatile BOOL gAdPlaying = NO;          // 广告已在播
 static volatile BOOL gAdClosing = NO;          // 已触发关闭，等 close 回调
 static volatile BOOL gAdSawClose = NO;
 static NSInteger gAdRemain = 0;
+// 领时长（任务 600590 luna_rewards_ads）的状态。必须声明在这里，
+// 因为 LCScheduleNext（广告关掉后推进轮次）要用它记账。
+static NSInteger gDurRemain = 0;
+static NSInteger gDurDone   = 0;
+static BOOL      gDurActive = NO;    // 接管中:广告关一次才记一次
+static NSTimeInterval gDurTapAt = 0;
+static NSTimer  *gDurTimer  = nil;
 static NSInteger gAdTotalCount = 0;
 static NSTimeInterval gAdPlayStart = 0;
 static NSTimeInterval gAdOpenAt = 0;
@@ -239,8 +246,14 @@ static UIView *LCFindControlByText(UIView *v, NSArray<NSString *> *texts, int de
             if (![t containsString:want]) continue;
             UIView *cur = v;
             for (int i = 0; i < 10 && cur; i++) {
-                if ([cur isKindOfClass:[UIControl class]] && ((UIControl *)cur).enabled) return cur;
-                if (cur.userInteractionEnabled && cur.gestureRecognizers.count > 0) return cur;
+                // 不能返回 UIScrollView 及子类。LynxScrollView 是 Lynx 的滚动容器，
+                // 几乎占满全屏又带手势，返回它等于点了个寂寞（实测日志里
+                // 一直出现 [dur] 活动页点「」<LynxScrollView>）。
+                BOOL isScroll = [cur isKindOfClass:[UIScrollView class]];
+                if (!isScroll) {
+                    if ([cur isKindOfClass:[UIControl class]] && ((UIControl *)cur).enabled) return cur;
+                    if (cur.userInteractionEnabled && cur.gestureRecognizers.count > 0) return cur;
+                }
                 cur = cur.superview;
             }
             return v;
@@ -628,6 +641,13 @@ static void LCTick(void) {
             // 90 秒是硬上限。到这儿说明 SDK 完全没给任何锚点,
             // 只推进轮次，不强行 dismiss（留着现场给下一次 dump）。
             if (el > gAdPlaySeconds + 90) {
+                if (gDurActive) {
+                    LCAutoLog(@"[dur] 这条广告 %ld 秒没结束，跳过，不再重试",
+                              (long)(gAdPlaySeconds + 90));
+                    gDurActive = NO;
+                    gDurRemain--;
+                    gDurTapAt = 0;
+                }
                 LCAutoLog(@"[ad] %ld 秒还没结束，放弃本轮（界面可能卡在广告页）",
                           (long)(gAdPlaySeconds + 90));
                 gAdSawClose = YES;
@@ -658,7 +678,21 @@ static void LCScheduleNext(void) {
     if (!gAdBusy) return;
     if (gAdRemain <= 0) {
         gAdBusy = NO;
-        LCAutoLog(@"[ad] 全部完成，共 %ld 次", (long)gAdTotalCount);
+        if (gDurActive) {
+            // 领时长：一条广告关掉才算一次
+            gDurActive = NO;
+            gDurDone++;
+            gDurRemain--;
+            gDurTapAt = 0;          // 允许立刻点下一次
+            LCAutoLog(@"[dur] 第 %ld 次完成，剩 %ld 次", (long)gDurDone, (long)gDurRemain);
+            if (gDurRemain <= 0 && gDurTimer) {
+                [gDurTimer invalidate];
+                gDurTimer = nil;
+                LCAutoLog(@"[dur] 全部完成，共 %ld 次", (long)gDurDone);
+            }
+        } else {
+            LCAutoLog(@"[ad] 全部完成，共 %ld 次", (long)gAdTotalCount);
+        }
         return;
     }
     gAdRemain--;
@@ -1124,8 +1158,14 @@ static void LCAdBeginExternal(void) {
     if (gAdTimer) { [gAdTimer invalidate]; gAdTimer = nil; }
     gAdBusy      = YES;
     gAdRemain    = 0;
-    gAdOpening   = YES;
-    gAdPlaying   = NO;
+    // 不能设成 gAdOpening —— 那条分支要等 DidLoadSuccess 回调，而领时长的广告
+    // 走的是 BDARV（BDARRefactorLynxVideoWrappView + BDASDKVideoPlayer），
+    // 不经过 BDUGLuckyADRewardVideoManager，回调永远不来，20 秒后就被判
+    // 「重试也没开出来，本轮作废」（实测 04:07:54 就是这样）。
+    // 用户点了按钮广告必然在播，直接进播放态，靠轮询找「领取成功」去关。
+    gAdOpening   = NO;
+    gAdPlaying   = YES;
+    gAdPlayStart = [[NSDate date] timeIntervalSince1970];
     gAdClosing   = NO;
     gAdSawClose  = NO;
     gAdDumped    = NO;
@@ -1144,10 +1184,6 @@ static void LCAdBeginExternal(void) {
 // 也就是「看一条激励视频换 1 天 VIP 时长」。广告本身走 lucky 那套，
 // 已经 hook 了 DidLoadSuccess / becomeEffective / close，播完能自动关。
 // 这里只需要把「点领时长 → 点活动页的广告按钮」这两步接上。
-static NSInteger gDurRemain  = 0;
-static NSInteger gDurDone    = 0;
-static NSTimeInterval gDurTapAt = 0;
-static NSTimer *gDurTimer = nil;
 
 static NSArray *LCDurationEntryTexts(void) {
     return @[@"领时长", @"去领取时长", @"领取时长"];
@@ -1180,8 +1216,10 @@ static void LCDurationTick(void) {
                   LCTextOfView(btn), NSStringFromClass([btn class]),
                   ok ? @"已发送" : @"点不动");
         if (ok) {
-            gDurRemain--;
-            gDurDone++;
+            // 这里不减轮次。之前一点就减，广告其实还在播，
+            // 3 次点击等于 1 次广告，日志却写「完成，共领 3 次」（假完成）。
+            // 改成广告真关掉时在 LCScheduleNext 里记账。
+            gDurActive = YES;
             LCAdBeginExternal();
         }
         return;
@@ -1213,6 +1251,7 @@ void LCAutoDuration(NSInteger times) {
     gDurRemain = times;
     gDurDone = 0;
     gDurTapAt = 0;
+    gDurActive = NO;
     LCAutoLog(@"[dur] 开始领时长 ×%ld", (long)times);
     if (gDurTimer) [gDurTimer invalidate];
     gDurTimer = [NSTimer scheduledTimerWithTimeInterval:1.5
