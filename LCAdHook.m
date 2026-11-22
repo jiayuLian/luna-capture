@@ -58,6 +58,7 @@ static NSInteger gAdTotalCount = 0;
 static NSTimeInterval gAdPlayStart = 0;
 static NSTimeInterval gAdOpenAt = 0;
 static NSTimeInterval gAdCloseTryAt = 0;   // 上次尝试关闭的时刻，用于限流重试
+static BOOL gAdRetried = NO;               // 本轮是否已经重试过开广告
 static NSTimer *gAdTimer = nil;
 
 #pragma mark - 工具
@@ -269,10 +270,19 @@ static void LCTick(void) {
         // DidLoadSuccess 没来（素材拉取失败 / 广告已无库存），20 秒算本轮失败
         if (gAdOpenAt > 0 &&
             [[NSDate date] timeIntervalSince1970] - gAdOpenAt > 20) {
-            LCAutoLog(@"[ad] 20 秒内没收到 DidLoadSuccess，本轮作废");
-            gAdOpenAt = 0;
-            gAdOpening = NO;
-            gAdSawClose = YES;   // 借 close 分支推进下一轮
+            // 一次失败不丢整轮：失败多半是因为 token 被上一次用掉了，
+            // 换新 token 再开一次。还不行才认输。
+            if (!gAdRetried && LCAdCurrentToken().length > 40) {
+                gAdRetried = YES;
+                LCAutoLog(@"[ad] 20 秒没开出来，换新 token 重试一次");
+                gAdOpenAt = [[NSDate date] timeIntervalSince1970];
+                (void)LCAdTrigger();
+            } else {
+                LCAutoLog(@"[ad] 重试也没开出来，本轮作废");
+                gAdOpenAt = 0;
+                gAdOpening = NO;
+                gAdSawClose = YES;   // 借 close 分支推进下一轮
+            }
         }
     }
 }
@@ -492,7 +502,15 @@ void LCAdNotePageResponse(NSString *body) {
             }
         }
     }
-    if (!found) return;
+    if (!found) {
+        // 没匹配到就报一次，别静默 —— 之前就是静默导致误判成"刷新没生效"
+        static int missOnce = 0;
+        if (missOnce++ < 3) {
+            LCAutoLog(@"[ad] 任务页里没找到 music_incentive_ad 的 token(body %luB)",
+                      (unsigned long)body.length);
+        }
+        return;
+    }
     if (!gAdLock) gAdLock = [NSLock new];
     [gAdLock lock];
     BOOL changed = ![found isEqualToString:gAdFreshToken];
@@ -573,6 +591,7 @@ id LCAdTrigger(void) {
     gAdSawClose = NO;
     gAdOpenAt = [[NSDate date] timeIntervalSince1970];
     gAdCloseTryAt = 0;
+    gAdRetried = NO;
 
     @try {
         // 精确签名直调，不用 NSInvocation —— 之前用 NSInvocation 转发
@@ -585,7 +604,10 @@ id LCAdTrigger(void) {
         }
         LCBridgeCallIMP f = (LCBridgeCallIMP)[bridge methodForSelector:s];
         if (f) f(bridge, s, pm, nil);
-        LCAutoLog(@"[ad] 已触发 bridge");
+        NSString *tk = LCAdCurrentToken();
+        LCAutoLog(@"[ad] 已触发 bridge(token %@)",
+                  tk ? [NSString stringWithFormat:@"新的 %luB", (unsigned long)tk.length]
+                     : @"沿用点击时那个");
     } @catch (NSException *e) {
         LCAutoLog(@"[ad] 调用异常: %@", e.reason);
         gAdOpening = NO;

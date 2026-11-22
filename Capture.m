@@ -169,8 +169,12 @@ static BOOL LCInternalHas(NSString *k) {
     // 任务页响应里带着最新的 music_incentive_ad token(280 字符,一次一个)。
     // 广告自动化每轮都要换新 token —— 复用旧 token 服务端会回 1300003 服务异常。
     // base64 的响应(二进制)跳过,任务页永远是明文 JSON。
-    if (!rec.respIsBase64 && rec.respBody.length > 200) {
-        if ([rec.url rangeOfString:@"/luna/treasure/task/page/v2"].location != NSNotFound) {
+    if ([rec.url rangeOfString:@"/luna/treasure/task/page/v2"].location != NSNotFound) {
+        // 这行是诊断用的：能看到任务页到底有没有被 Capture 收到、
+        // 拿到的 body 是不是明文 JSON。没有它就只能瞎猜。
+        LCAutoLog(@"[ad] 见到任务页 %luB %@", (unsigned long)rec.respBody.length,
+                  rec.respIsBase64 ? @"(base64/二进制,跳过)" : @"(明文)");
+        if (!rec.respIsBase64 && rec.respBody.length > 200) {
             LCAdNotePageResponse(rec.respBody);
         }
     }
