@@ -61,6 +61,10 @@ static NSInteger gAdRemain = 0;
 // 领时长（任务 600590 luna_rewards_ads）的状态。必须声明在这里，
 // 因为 LCScheduleNext（广告关掉后推进轮次）要用它记账。
 static NSInteger gDurRemain = 0;
+// 任务 600590 的 button.schema（sslocal://luckydog/activity_task?...）。
+// 金币页是 Lynx 渲染的，里面没有能点的 UIKit 控件，只能靠 schema 打开活动页。
+static NSString *gDurSchema = nil;
+static NSString *gDurSchemaDate = nil;          // 只在当天有效，隔天必须换
 static NSInteger gDurDone   = 0;
 static BOOL      gDurActive = NO;    // 接管中:广告关一次才记一次
 static NSTimeInterval gDurTapAt = 0;
@@ -144,20 +148,30 @@ static UIView *LCFindControlByText(UIView *v, NSArray<NSString *> *texts, int de
 // 激励视频几乎都跑在自己的 UIWindow 里，而且未必是 keyWindow。
 // 只遍历 keyWindow 会漏掉「再看一个视频」那个弹窗 —— 认字全部落空。
 // 这个函数返回全部可见 window，后加的在上面。
+// 自家浮窗的类名。它 level=2050 排在最上层，如果参与文案匹配，
+// 会把「领时长」匹配成浮窗菜单里那个「领时长 ×3」按钮，
+// 也会把 54x54 的红色圆钮当成广告关闭按钮（实测 04:14 连点 4 次）。
+// 所以所有"找按钮"的遍历都必须把它排除掉。
+static BOOL LCIsOwnWindow(UIWindow *w) {
+    return [NSStringFromClass([w class]) isEqualToString:@"LCFloatWindow"];
+}
+
 static NSArray<UIWindow *> *LCAllWindows(void) {
     NSMutableArray *arr = [NSMutableArray array];
     if (@available(iOS 13.0, *)) {
         for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
             if (![sc isKindOfClass:[UIWindowScene class]]) continue;
             for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-                if (!w.isHidden && w.alpha > 0.01 && w.bounds.size.width > 100) {
+                if (!w.isHidden && w.alpha > 0.01 && w.bounds.size.width > 100 &&
+                    !LCIsOwnWindow(w)) {
                     [arr addObject:w];
                 }
             }
         }
     } else {
         for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (!w.isHidden && w.alpha > 0.01 && w.bounds.size.width > 100) {
+            if (!w.isHidden && w.alpha > 0.01 && w.bounds.size.width > 100 &&
+                !LCIsOwnWindow(w)) {
                 [arr addObject:w];
             }
         }
@@ -246,16 +260,23 @@ static UIView *LCFindControlByText(UIView *v, NSArray<NSString *> *texts, int de
             if (![t containsString:want]) continue;
             UIView *cur = v;
             for (int i = 0; i < 10 && cur; i++) {
-                // 不能返回 UIScrollView 及子类。LynxScrollView 是 Lynx 的滚动容器，
-                // 几乎占满全屏又带手势，返回它等于点了个寂寞（实测日志里
-                // 一直出现 [dur] 活动页点「」<LynxScrollView>）。
-                BOOL isScroll = [cur isKindOfClass:[UIScrollView class]];
-                if (!isScroll) {
+                BOOL skip = [cur isKindOfClass:[UIScrollView class]];
+                // Lynx 把所有手势都挂在根 LynxView 上（accessibilityLabel 是
+                // "lynxview"），全屏。以前命中文案后一路向上找可点祖先，
+                // 最后返回的就是它 —— 日志里 `点「lynxview」<LynxView>`，
+                // 点整个页面等于没点。所以根容器也要跳过。
+                if (!skip && cur.bounds.size.width >= v.window.bounds.size.width - 2 &&
+                    cur.bounds.size.height >= v.window.bounds.size.height - 2) {
+                    skip = YES;
+                }
+                if (!skip) {
                     if ([cur isKindOfClass:[UIControl class]] && ((UIControl *)cur).enabled) return cur;
                     if (cur.userInteractionEnabled && cur.gestureRecognizers.count > 0) return cur;
                 }
                 cur = cur.superview;
             }
+            // 找不到合适的祖先就返回命中文字的那个视图本身（UILynxView / LynxTextView），
+            // 由 LCTapLynxView 用它的坐标去 hitTest。
             return v;
         }
     }
@@ -443,7 +464,9 @@ static BOOL LCTapLynxView(UIView *v) {
 #pragma mark - 界面树
 
 static void LCDumpTreeWalk(UIView *v, int depth, NSMutableString *out) {
-    if (!v || depth > 14) return;
+    // 14 层不够：金币任务页的卡片在 LunaTabBarSlidingScrollView 的 cell 里，
+    // 到第 15 层就被截断了，所以之前的界面树里一个任务卡都看不到。
+    if (!v || depth > 26) return;
     CGRect f = v.frame;
     NSString *t = LCTextOfView(v);
     if (t.length > 40) t = [t substringToIndex:40];
@@ -908,6 +931,27 @@ void LCAdNotePageResponse(NSString *body) {
             NSDictionary *dd = cur;
             NSString *key = dd[@"key"];
             NSString *tok = dd[@"token"];
+
+            // 顺手把「领时长」的 schema 抠出来
+            if ([key isKindOfClass:[NSString class]] &&
+                [key isEqualToString:@"luna_rewards_ads"]) {
+                id vv = dd[@"view"];
+                if ([vv isKindOfClass:[NSDictionary class]]) {
+                    id bb = ((NSDictionary *)vv)[@"button"];
+                    if ([bb isKindOfClass:[NSDictionary class]]) {
+                        id sc = ((NSDictionary *)bb)[@"schema"];
+                        if ([sc isKindOfClass:[NSString class]] && [sc length] > 40 &&
+                            [sc hasPrefix:@"sslocal://"]) {
+                            if (!gDurSchema || ![gDurSchema isEqualToString:sc]) {
+                                gDurSchema = [sc copy];
+                                LCAutoLog(@"[dur] 拿到领时长 schema(%luB)",
+                                          (unsigned long)[sc length]);
+                            }
+                        }
+                    }
+                }
+            }
+
             if ([key isKindOfClass:[NSString class]] &&
                 [key isEqualToString:@"music_incentive_ad"] &&
                 [tok isKindOfClass:[NSString class]] && tok.length > 40) {
@@ -1185,6 +1229,24 @@ static void LCAdBeginExternal(void) {
 // 已经 hook 了 DidLoadSuccess / becomeEffective / close，播完能自动关。
 // 这里只需要把「点领时长 → 点活动页的广告按钮」这两步接上。
 
+// 金币页是 Lynx 渲染的，任务卡在 Lynx 的 canvas 里 —— UIKit 树里只有
+// 一个全屏 LynxView，手势全挂在它身上，合成点击不知道该点哪儿。
+// 所以入口改用 schema 直接路由：sslocal://luckydog/activity_task?...
+// 这是 App 自己的 scheme，openURL 会回到 App 的 router 去处理。
+static BOOL LCOpenSchema(NSString *schema) {
+    if (schema.length < 20) return NO;
+    NSURL *u = [NSURL URLWithString:schema];
+    if (!u) return NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[UIApplication sharedApplication] openURL:u
+                                           options:@{}
+                                 completionHandler:^(BOOL ok) {
+            LCAutoLog(@"[dur] openURL(%@) -> %@", u.scheme, ok ? @"OK" : @"失败");
+        }];
+    });
+    return YES;
+}
+
 static NSArray *LCDurationEntryTexts(void) {
     return @[@"领时长", @"去领取时长", @"领取时长"];
 }
@@ -1225,7 +1287,16 @@ static void LCDurationTick(void) {
         return;
     }
 
-    // ② 金币任务页的入口
+    // ② 用 schema 打开活动页。优先于文案点击 —— 金币页的按钮根本点不动。
+    if (gDurSchema.length > 20) {
+        gDurTapAt = now;
+        if (LCOpenSchema(gDurSchema)) {
+            LCAutoLog(@"[dur] 用 schema 打开领时长活动页");
+            return;
+        }
+    }
+
+    // ③ 实在没有 schema 才退回文案点击
     btn = LCFindByTextAnywhere(LCDurationEntryTexts());
     if (btn) {
         gDurTapAt = now;
