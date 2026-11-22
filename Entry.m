@@ -129,6 +129,10 @@ static void LCStartupSchedulers(void) {
         LCDiagLine([NSString stringWithFormat:@"==== launch %@ mode=%@ ====",
                     LC_VER, full ? @"full" : @"safe"]);
 
+        // 一开始就落一行,这样 lc_auto.txt 从启动起就存在,
+        // 不用等到第一次点按钮才有文件。
+        LCAutoLog(@"启动 %@ mode=%@", LC_VER, full ? @"full" : @"safe");
+
         // BoringSSL 层是纯数据段重绑,不改代码页,两种模式都装。
         // 安全模式下关掉 inline hook 兜底,只保留最稳的那条路。
         LCSetSSLMode(full);
