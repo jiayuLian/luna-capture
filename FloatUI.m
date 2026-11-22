@@ -28,6 +28,7 @@
 @property (nonatomic, assign) CGRect buttonRect;
 - (void)lcExport:(BOOL)har;
 - (void)runAutoClaim;
+- (void)runAutoAd;
 - (void)showAutoTail;
 @end
 
@@ -122,7 +123,7 @@ static UIViewController *LCAppVC(void) {
 
     CGFloat pw = 250;
     CGFloat rowH = 46;
-    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"自动领奖", @"清空记录", @"关闭菜单"];
+    NSArray *titles = @[@"导出 HAR", @"导出 JSON", @"自动领奖", @"看广告 ×5", @"清空记录", @"关闭菜单"];
     CGFloat ph = 54 + rowH * (CGFloat)titles.count + 12;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - pw) / 2.0,
@@ -152,7 +153,8 @@ static UIViewController *LCAppVC(void) {
         [row setTitle:titles[(NSUInteger)i] forState:UIControlStateNormal];
         UIColor *c = [UIColor darkTextColor];
         if (i == 2) c = [UIColor systemBlueColor];      // 自动领奖
-        if (i == 3) c = [UIColor systemRedColor];       // 清空记录
+        if (i == 3) c = [UIColor systemBlueColor];      // 看广告
+        if (i == 4) c = [UIColor systemRedColor];       // 清空记录
         [row setTitleColor:c forState:UIControlStateNormal];
         [row addTarget:self action:@selector(onMenuRow:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -181,7 +183,8 @@ static UIViewController *LCAppVC(void) {
         case 0: [self lcExport:YES]; break;
         case 1: [self lcExport:NO];  break;
         case 2: [self runAutoClaim]; break;
-        case 3:
+        case 3: [self runAutoAd]; break;
+        case 4:
             [[LCCapture shared] clear];
             [self hideMenu];
             break;
@@ -223,6 +226,31 @@ static UIViewController *LCAppVC(void) {
                    dispatch_get_main_queue(), ^{
         [ws showAutoTail];
     });
+}
+
+// 循环看激励视频。
+// 广告本身仍由 App 播放(真实曝光),这里只是反复替用户点那个按钮,
+// 所以服务端看到的时长、曝光、完播都是真的,不需要伪造 time_token。
+- (void)runAutoAd {
+    [self hideMenu];
+
+    if (!LCAdHasTemplate()) {
+        [self toast:@"先在 App 里手动点一次\n「看广告赚金币」\n让它把参数录下来"];
+        return;
+    }
+    if (LCAdBusy()) {
+        [self toast:@"广告循环已经在跑"];
+        return;
+    }
+
+    LCAdRun(5);
+    [self toast:@"开始,每次约 50 秒\n共 5 次,日志见 lc_auto.txt"];
+
+    __weak typeof(self) ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(270 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [ws showAutoTail]; });
 }
 
 - (void)showAutoTail {
