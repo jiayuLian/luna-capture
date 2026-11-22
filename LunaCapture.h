@@ -2,7 +2,7 @@
 #import <UIKit/UIKit.h>
 
 // 版本标记,workflow 用来断言产物版本
-#define LC_VER @"v1.3.1"
+#define LC_VER @"v1.4.0"
 
 @interface LCRecord : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -44,6 +44,13 @@ void LCHookAll(void);
 
 // TTNet(Cronet)门面层旁路。iOS 版汽水业务请求全走这里,NSURLSession 只承载少量 CDN JSON。
 void LCHookTTNet(void);
+
+// NSURLSession 层旁路:hook -[NSURLSessionTask resume] 与 TTNet 的 session delegate。
+// 这是主通道,覆盖 delegate 模式的请求。
+void LCHookSession(void);
+
+// 跨通道去重:同一请求被两条通道各碰一次时只放一条过
+BOOL LCTryClaimURL(NSString *url, NSString *method);
 
 // hook 诊断信息,导出 HAR 时写进 creator.comment,便于判断通道是否生效
 extern NSString *LCHookInfo;
